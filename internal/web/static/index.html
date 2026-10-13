@@ -1,0 +1,252 @@
+<!doctype html>
+<html lang="id">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#0f766e">
+  <title>Buku Kas Pintar</title>
+  <link rel="icon" href="/assets/icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/assets/style.css">
+</head>
+<body>
+<div id="app" v-cloak>
+  <main class="shell">
+    <div v-if="toast" class="toast" :class="toast.kind" role="status">{{ toast.text }}</div>
+
+    <!-- MASUK / DAFTAR -->
+    <section v-if="!token" class="card auth">
+      <h1>Buku Kas Pintar</h1>
+      <p class="muted">Pisahkan uang usaha dan uang pribadi, supaya kas tidak "bocor".</p>
+      <form @submit.prevent="submitAuth">
+        <label v-if="authMode === 'register'">Nama
+          <input v-model.trim="auth.name" autocomplete="name" maxlength="80" required>
+        </label>
+        <label>Nomor HP
+          <input v-model.trim="auth.phone" inputmode="tel" autocomplete="tel" placeholder="08123456789" required>
+        </label>
+        <label>PIN (minimal 6 angka)
+          <input v-model="auth.pin" type="password" inputmode="numeric" minlength="6" maxlength="64"
+                 :autocomplete="authMode === 'login' ? 'current-password' : 'new-password'" required>
+        </label>
+        <button class="btn primary" :disabled="busy">{{ authMode === 'login' ? 'Masuk' : 'Daftar' }}</button>
+      </form>
+      <button class="link" type="button" @click="authMode = authMode === 'login' ? 'register' : 'login'">
+        {{ authMode === 'login' ? 'Belum punya akun? Daftar' : 'Sudah punya akun? Masuk' }}
+      </button>
+    </section>
+
+    <!-- BUAT USAHA PERTAMA -->
+    <section v-else-if="loaded && !business" class="card">
+      <h1>Usaha kamu</h1>
+      <p class="muted">Dompet Usaha dan Dompet Pribadi akan dibuat otomatis.</p>
+      <form @submit.prevent="createBusiness">
+        <label>Nama usaha
+          <input v-model.trim="newBiz.name" maxlength="80" placeholder="Warung Bu Sari" required>
+        </label>
+        <label>Jenis usaha
+          <select v-model="newBiz.kind">
+            <option value="warung_makan">Warung makan</option>
+            <option value="toko_kelontong">Toko kelontong</option>
+            <option value="pedagang_pasar">Pedagang pasar</option>
+            <option value="jasa">Jasa</option>
+            <option value="lainnya">Lainnya</option>
+          </select>
+        </label>
+        <button class="btn primary" :disabled="busy">Mulai</button>
+      </form>
+      <button class="link" type="button" @click="logout">Keluar</button>
+    </section>
+
+    <!-- APLIKASI -->
+    <template v-else-if="business">
+      <header class="top">
+        <div>
+          <div class="muted small">{{ business.name }}</div>
+          <strong>Halo, {{ me && me.name }}</strong>
+        </div>
+        <button class="link" @click="logout">Keluar</button>
+      </header>
+
+      <!-- BERANDA -->
+      <template v-if="tab === 'home'">
+        <div class="seg" role="tablist">
+          <button :class="{ on: walletView === 'business' }" @click="setWalletView('business')">Usaha</button>
+          <button :class="{ on: walletView === 'personal' }" @click="setWalletView('personal')">Pribadi</button>
+        </div>
+        <div class="card">
+          <div class="muted small">Saldo dompet {{ walletView === 'business' ? 'usaha' : 'pribadi' }}</div>
+          <div class="big" :class="{ neg: currentBalance < 0 }">{{ rp(currentBalance) }}</div>
+        </div>
+
+        <div v-if="homeReport && homeReport.leak_detected" class="alert danger">
+          <strong>Kas usaha bocor.</strong>
+          Uang yang diambil pribadi bulan ini ({{ rp(homeReport.net_prive) }}) lebih besar
+          {{ rp(homeReport.leak_amount) }} dari untung ({{ rp(homeReport.profit) }}).
+        </div>
+        <div v-else-if="walletBalance('business') < 0" class="alert warn">
+          Saldo kas usaha minus. Cek pengeluaran atau setor modal.
+        </div>
+        <div v-if="homeReport && homeReport.profit > 0 && !homeReport.leak_detected" class="alert good">
+          Bulan ini kamu untung {{ rp(homeReport.profit) }}. Siap nabung?
+        </div>
+
+        <h2>Riwayat</h2>
+        <p v-if="!txs.length" class="muted">Belum ada transaksi. Mulai dari tab "Catat".</p>
+        <ul class="list">
+          <li v-for="t in txs" :key="t.id">
+            <div>
+              <div>{{ t.category_name || (t.direction === 'in' ? 'Pemasukan' : 'Pengeluaran') }}</div>
+              <div class="muted small">{{ fmtDate(t.occurred_at) }} · {{ t.wallet === 'business' ? 'Usaha' : 'Pribadi' }}<span v-if="t.note"> · {{ t.note }}</span></div>
+            </div>
+            <div class="amt" :class="t.direction">
+              {{ t.direction === 'in' ? '+' : '-' }}{{ rp(t.amount) }}
+              <button class="x" @click="removeTx(t)" aria-label="Hapus transaksi">&times;</button>
+            </div>
+          </li>
+        </ul>
+        <button v-if="nextCursor" class="btn" :disabled="busy" @click="loadMore">Muat lebih banyak</button>
+      </template>
+
+      <!-- CATAT -->
+      <template v-else-if="tab === 'add'">
+        <form class="card" @submit.prevent="submitTx">
+          <h2>Catat transaksi</h2>
+          <div class="seg">
+            <button type="button" :class="{ on: form.kind === 'income' }" @click="setKind('income')">Pemasukan</button>
+            <button type="button" :class="{ on: form.kind === 'expense' }" @click="setKind('expense')">Pengeluaran</button>
+          </div>
+          <label>Dompet
+            <select v-model="form.wallet" @change="form.category_id = ''">
+              <option value="business">Usaha</option>
+              <option value="personal">Pribadi</option>
+            </select>
+          </label>
+          <label>Nominal (Rp)
+            <input v-model.number="form.amount" type="number" inputmode="numeric" min="1" step="1" required>
+          </label>
+          <label>Kategori
+            <select v-model="form.category_id">
+              <option value="">(tanpa kategori)</option>
+              <option v-for="c in formCategories" :key="c.id" :value="c.id">{{ c.name }}</option>
+            </select>
+          </label>
+          <label>Catatan (opsional)
+            <input v-model.trim="form.note" maxlength="280">
+          </label>
+          <button class="btn primary" :disabled="busy">Simpan</button>
+        </form>
+
+        <form class="card" @submit.prevent="submitTransfer">
+          <h2>Pindahkan uang</h2>
+          <p class="muted small">Ambil uang usaha untuk keperluan pribadi dicatat sebagai "prive". Ini yang dipantau untuk mendeteksi kebocoran kas.</p>
+          <div class="seg">
+            <button type="button" :class="{ on: transfer.direction === 'to_personal' }" @click="transfer.direction = 'to_personal'">Usaha &rarr; Pribadi</button>
+            <button type="button" :class="{ on: transfer.direction === 'to_business' }" @click="transfer.direction = 'to_business'">Pribadi &rarr; Usaha</button>
+          </div>
+          <label>Nominal (Rp)
+            <input v-model.number="transfer.amount" type="number" inputmode="numeric" min="1" step="1" required>
+          </label>
+          <label>Catatan (opsional)
+            <input v-model.trim="transfer.note" maxlength="280">
+          </label>
+          <button class="btn" :disabled="busy">Pindahkan</button>
+        </form>
+      </template>
+
+      <!-- SCAN NOTA -->
+      <template v-else-if="tab === 'scan'">
+        <section v-if="!receipt" class="card">
+          <h2>Scan nota belanja</h2>
+          <p class="muted small">Foto nota bahan baku. Hasil bacaan selalu kamu periksa dulu sebelum disimpan.</p>
+          <label class="file">
+            <input type="file" accept="image/jpeg,image/png" capture="environment" @change="onFile" :disabled="busy">
+            <span class="btn primary">{{ busy ? 'Memproses...' : 'Ambil / pilih foto nota' }}</span>
+          </label>
+        </section>
+
+        <section v-else class="card">
+          <h2>Periksa hasil scan</h2>
+          <div v-if="receipt.engine === 'mock'" class="alert warn small">
+            Mode uji lokal: OCR tiruan memilih nota contoh, bukan membaca foto kamu. Koreksi bebas.
+          </div>
+          <img v-if="receiptImg" :src="receiptImg" class="receipt-img" alt="Foto nota">
+          <div v-if="receipt.status === 'failed'" class="alert danger">
+            Nota tidak bisa dibaca otomatis. Kamu bisa isi manual di bawah atau
+            <button class="link" type="button" @click="resetReceipt">coba foto lagi</button>.
+          </div>
+          <div v-else class="muted small">Tingkat keyakinan bacaan: {{ Math.round(receipt.confidence * 100) }}%</div>
+
+          <form @submit.prevent="confirmReceipt">
+            <label>Nama toko
+              <input v-model.trim="rform.merchant" maxlength="80">
+            </label>
+            <label>Tanggal nota
+              <input v-model="rform.date" type="date">
+            </label>
+            <label>Dibayar dari
+              <select v-model="rform.wallet">
+                <option value="business">Dompet Usaha</option>
+                <option value="personal">Dompet Pribadi</option>
+              </select>
+            </label>
+            <div v-for="(it, i) in rform.items" :key="i" class="item">
+              <input v-model.trim="it.name" maxlength="100" placeholder="Nama item" required>
+              <div class="row">
+                <input v-model.number="it.qty" type="number" min="0.001" step="0.001" required aria-label="Jumlah">
+                <input v-model.number="it.unit_price" type="number" min="0" step="1" required aria-label="Harga satuan">
+                <button class="x" type="button" @click="rform.items.splice(i, 1)" aria-label="Hapus item">&times;</button>
+              </div>
+              <select v-model="it.category_id">
+                <option :value="null">(Lain-lain)</option>
+                <option v-for="c in receiptCategories" :key="c.id" :value="c.id">{{ c.name }}</option>
+              </select>
+              <div class="muted small right">{{ rp(Math.round(it.qty * it.unit_price) || 0) }}</div>
+            </div>
+            <button class="link" type="button" @click="addItem">+ Tambah item</button>
+            <div class="total"><span>Total</span><strong>{{ rp(receiptTotal) }}</strong></div>
+            <button class="btn primary" :disabled="busy || !rform.items.length">Simpan sebagai pengeluaran</button>
+            <button class="link" type="button" @click="resetReceipt">Batal</button>
+          </form>
+        </section>
+      </template>
+
+      <!-- LAPORAN -->
+      <template v-else-if="tab === 'report'">
+        <div class="card">
+          <h2>Laporan bulanan</h2>
+          <label>Bulan
+            <input type="month" v-model="month" @change="load(loadReport)">
+          </label>
+          <dl v-if="report" class="rows">
+            <dt>Penjualan</dt><dd>{{ rp(report.revenue) }}</dd>
+            <dt>Biaya usaha</dt><dd>-{{ rp(report.expenses) }}</dd>
+            <dt class="strong">Untung bersih</dt><dd class="strong" :class="report.profit < 0 ? 'neg' : 'pos'">{{ rp(report.profit) }}</dd>
+            <dt>Diambil pribadi (prive)</dt><dd>-{{ rp(report.prive) }}</dd>
+            <dt>Disetor ke usaha</dt><dd>+{{ rp(report.capital_in) }}</dd>
+          </dl>
+          <div v-if="report" class="bars" aria-hidden="true">
+            <div class="bar good" :style="{ width: barWidth(Math.max(report.profit, 0)) }"></div>
+            <div class="bar bad" :style="{ width: barWidth(Math.max(report.net_prive, 0)) }"></div>
+          </div>
+          <p v-if="report" class="muted small">Hijau: untung. Merah: uang bersih yang diambil pribadi.</p>
+          <div v-if="report && report.leak_detected" class="alert danger">
+            Uang yang kamu ambil lebih besar {{ rp(report.leak_amount) }} dari untung. Inilah yang menguras kas usaha.
+          </div>
+        </div>
+      </template>
+
+      <nav class="tabs" aria-label="Menu utama">
+        <button :class="{ on: tab === 'home' }" @click="go('home')">Beranda</button>
+        <button :class="{ on: tab === 'add' }" @click="go('add')">Catat</button>
+        <button :class="{ on: tab === 'scan' }" @click="go('scan')">Scan</button>
+        <button :class="{ on: tab === 'report' }" @click="go('report')">Laporan</button>
+      </nav>
+    </template>
+
+    <p v-else class="muted center">Memuat...</p>
+  </main>
+</div>
+<script src="/assets/vue.global.prod.js"></script>
+<script src="/assets/app.js"></script>
+</body>
+</html>

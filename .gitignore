@@ -1,0 +1,6 @@
+.env
+data/
+bin/
+*.log
+*.exe
+*Docs__.md
