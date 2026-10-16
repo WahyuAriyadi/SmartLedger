@@ -44,8 +44,9 @@ func (h *Handler) Routes(mux *http.ServeMux, protect, upload httpx.Middleware) {
 	route("POST /v1/businesses/{bid}/receipts/{rid}/confirm", nil, h.confirm)
 }
 
-func (h *Handler) upload(w http.ResponseWriter, r *http.Request, uid string) error {
-	// Perpanjang batas waktu khusus endpoint ini (server-wide hanya 10-15 detik).
+// readImageUpload membaca field multipart "image" dengan batas ukuran, dan memperpanjang batas waktu
+// baca/tulis khusus request ini (server-wide hanya 10-15 detik, sedangkan koneksi seluler bisa lambat).
+func readImageUpload(w http.ResponseWriter, r *http.Request) ([]byte, error) {
 	rc := http.NewResponseController(w)
 	_ = rc.SetReadDeadline(time.Now().Add(uploadReadWindow))
 	_ = rc.SetWriteDeadline(time.Now().Add(uploadWriteWindow))
@@ -53,7 +54,7 @@ func (h *Handler) upload(w http.ResponseWriter, r *http.Request, uid string) err
 	r.Body = http.MaxBytesReader(w, r.Body, MaxUploadBytes+(64<<10))
 	mr, err := r.MultipartReader()
 	if err != nil {
-		return apperr.Validation("invalid_upload", "kirim sebagai multipart/form-data dengan field 'image'")
+		return nil, apperr.Validation("invalid_upload", "kirim sebagai multipart/form-data dengan field 'image'")
 	}
 	var raw []byte
 	for {
@@ -62,7 +63,7 @@ func (h *Handler) upload(w http.ResponseWriter, r *http.Request, uid string) err
 			break
 		}
 		if err != nil {
-			return uploadErr(err)
+			return nil, uploadErr(err)
 		}
 		if part.FormName() != "image" {
 			part.Close()
@@ -70,12 +71,20 @@ func (h *Handler) upload(w http.ResponseWriter, r *http.Request, uid string) err
 		}
 		raw, err = readPart(part)
 		if err != nil {
-			return uploadErr(err)
+			return nil, uploadErr(err)
 		}
 		break
 	}
 	if raw == nil {
-		return apperr.Validation("invalid_upload", "field 'image' wajib ada")
+		return nil, apperr.Validation("invalid_upload", "field 'image' wajib ada")
+	}
+	return raw, nil
+}
+
+func (h *Handler) upload(w http.ResponseWriter, r *http.Request, uid string) error {
+	raw, err := readImageUpload(w, r)
+	if err != nil {
+		return err
 	}
 
 	// Lepas dari batas 10 detik milik request, tapi tetap dibatasi OCR timeout sendiri.

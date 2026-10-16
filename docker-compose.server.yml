@@ -1,0 +1,54 @@
+# Tambahan untuk MODE SERVER (akun + PostgreSQL + RLS), seperti versi sebelumnya.
+#   docker compose -f docker-compose.yml -f docker-compose.server.yml up --build -d
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?jalankan scripts/init-env.ps1 dulu}
+      POSTGRES_DB: ledger
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      # Membuat role aplikasi `ledger_app` (bukan superuser, tunduk pada RLS). Hanya jalan saat volume baru.
+      - ./deploy/initdb:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d ledger"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+    # Port 5432 sengaja TIDAK dipublikasikan. Untuk tes integrasi dari Windows, lihat docker-compose.dev.yml.
+
+  migrate:
+    build: .
+    image: smartledger:local
+    command: ["migrate"]
+    environment:
+      # Pemilik skema, hanya dipakai sebentar untuk migrasi; API tidak pernah memakai kredensial ini.
+      MIGRATE_DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD}@db:5432/ledger?sslmode=disable
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"
+
+  api:
+    environment:
+      STORAGE_MODE: server
+      # Role terbatas: tanpa DELETE, tanpa akses langsung ke tabel sesi, tunduk pada Row Level Security.
+      DATABASE_URL: postgres://ledger_app:ledger_app_dev@db:5432/ledger?sslmode=disable
+      DATA_KEYS: ${DATA_KEYS:?jalankan scripts/init-env.ps1 dulu}
+      DATA_KEY_ACTIVE: ${DATA_KEY_ACTIVE:-1}
+      PHONE_PEPPER: ${PHONE_PEPPER:?jalankan scripts/init-env.ps1 dulu}
+      STORAGE_BACKEND: local
+      STORAGE_LOCAL_DIR: /data/receipts
+    volumes:
+      - receipts:/data/receipts
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+volumes:
+  pgdata:
+  receipts:

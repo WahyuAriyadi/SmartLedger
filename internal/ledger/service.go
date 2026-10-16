@@ -375,15 +375,56 @@ func (s *Service) Transfer(ctx context.Context, uid, bid string, in NewTransfer)
 }
 
 type ListParams struct {
-	Wallet string // "", "business", atau "personal"
-	Limit  int
-	Cursor string
+	Wallet     string // "", "business", atau "personal"
+	Kind       string // "", "income", "expense", atau "transfer"
+	CategoryID string // "" = semua kategori
+	From, To   string // YYYY-MM-DD (WIB), keduanya inklusif; "" = tanpa batas
+	Limit      int
+	Cursor     string
+}
+
+// dayBounds mengubah rentang tanggal WIB menjadi [awal, akhir) dalam UTC-agnostic time.Time.
+func (s *Service) dayBounds(from, to string) (sql.NullTime, sql.NullTime, error) {
+	var f, t sql.NullTime
+	bad := apperr.Validation("invalid_date", "format tanggal harus YYYY-MM-DD")
+	if from != "" {
+		d, err := time.ParseInLocation("2006-01-02", from, s.loc)
+		if err != nil {
+			return f, t, bad
+		}
+		f = sql.NullTime{Time: d, Valid: true}
+	}
+	if to != "" {
+		d, err := time.ParseInLocation("2006-01-02", to, s.loc)
+		if err != nil {
+			return f, t, bad
+		}
+		t = sql.NullTime{Time: d.AddDate(0, 0, 1), Valid: true} // eksklusif: awal hari berikutnya
+	}
+	if f.Valid && t.Valid && !t.Time.After(f.Time) {
+		return f, t, apperr.Validation("invalid_date", "tanggal akhir tidak boleh sebelum tanggal awal")
+	}
+	return f, t, nil
 }
 
 // List memakai keyset pagination: stabil walau ada data baru dan tidak melambat di halaman dalam.
 func (s *Service) List(ctx context.Context, uid, bid string, p ListParams) ([]Transaction, string, error) {
 	if p.Wallet != "" && p.Wallet != "business" && p.Wallet != "personal" {
 		return nil, "", apperr.Validation("invalid_wallet", "dompet harus 'business' atau 'personal'")
+	}
+	if p.Kind != "" && p.Kind != "income" && p.Kind != "expense" && p.Kind != "transfer" {
+		return nil, "", apperr.Validation("invalid_kind", "jenis harus 'income', 'expense', atau 'transfer'")
+	}
+	if p.CategoryID != "" && !secure.IsUUID(p.CategoryID) {
+		return nil, "", apperr.Validation("invalid_category", "category_id tidak valid")
+	}
+	from, to, err := s.dayBounds(p.From, p.To)
+	if err != nil {
+		return nil, "", err
+	}
+	var catFilter sql.NullString
+	if p.CategoryID != "" {
+		catFilter = sql.NullString{String: p.CategoryID, Valid: true}
 	}
 	if p.Limit <= 0 {
 		p.Limit = 30
@@ -402,7 +443,7 @@ func (s *Service) List(ctx context.Context, uid, bid string, p ListParams) ([]Tr
 	}
 
 	out := []Transaction{}
-	err := s.db.InTx(ctx, uid, func(tx *sql.Tx) error {
+	err = s.db.InTx(ctx, uid, func(tx *sql.Tx) error {
 		out = out[:0]
 		if err := requireBusiness(ctx, tx, bid); err != nil {
 			return err
@@ -411,8 +452,12 @@ func (s *Service) List(ctx context.Context, uid, bid string, p ListParams) ([]Tr
 			WHERE t.business_id = $1 AND t.deleted_at IS NULL
 			  AND ($2::text = '' OR w.kind = $2)
 			  AND ($3::timestamptz IS NULL OR (t.occurred_at, t.id) < ($3::timestamptz, $4::uuid))
+			  AND ($5::text = '' OR t.kind = $5)
+			  AND ($6::uuid IS NULL OR t.category_id = $6::uuid)
+			  AND ($7::timestamptz IS NULL OR t.occurred_at >= $7::timestamptz)
+			  AND ($8::timestamptz IS NULL OR t.occurred_at < $8::timestamptz)
 			ORDER BY t.occurred_at DESC, t.id DESC
-			LIMIT $5`, bid, p.Wallet, curTime, curID, p.Limit+1)
+			LIMIT $9`, bid, p.Wallet, curTime, curID, p.Kind, catFilter, from, to, p.Limit+1)
 		if err != nil {
 			return err
 		}

@@ -27,10 +27,12 @@ import (
 	"time"
 
 	_ "github.com/lib/pq"
+	_ "time/tzdata"
 
 	"smartledger/internal/config"
 	"smartledger/internal/platform/db"
 	"smartledger/internal/platform/httpx"
+	"smartledger/internal/secure"
 	"smartledger/migrations"
 )
 
@@ -108,7 +110,7 @@ func setup(t *testing.T) (api, *sql.DB, *sql.DB, *db.DB) {
 		DataKeys: map[string][]byte{"1": randKey()}, ActiveKeyID: "1", PhonePepper: randKey(),
 		SessionTTL: time.Hour, MaxFailedLogins: 5, LockDuration: 15 * time.Minute,
 		RequestTimeout: 10 * time.Second, HashConcurrency: 4, RateLimitRPS: 1000, RateLimitBurst: 1000,
-		StorageBackend: "local", StorageLocalDir: t.TempDir(), OCRBackend: "mock",
+		StorageBackend: "local", StorageLocalDir: t.TempDir(), OCRBackend: "mock", StorageMode: "server",
 	}
 	h, err := New(Deps{Cfg: cfg, DB: appDB, Ready: &ready, AuthLimiter: httpx.NewLimiter(1000, 1000)})
 	if err != nil {
@@ -329,7 +331,7 @@ func TestLoginLockoutAndRateLimit(t *testing.T) {
 	h, _ := New(Deps{Cfg: config.Config{DataKeys: map[string][]byte{"1": randKey()}, ActiveKeyID: "1", PhonePepper: randKey(),
 		SessionTTL: time.Hour, MaxFailedLogins: 5, LockDuration: time.Minute, RequestTimeout: 5 * time.Second,
 		HashConcurrency: 2, RateLimitRPS: 1000, RateLimitBurst: 1000,
-		StorageBackend: "local", StorageLocalDir: t.TempDir(), OCRBackend: "mock"}, DB: appDB, Ready: &ready})
+		StorageBackend: "local", StorageLocalDir: t.TempDir(), OCRBackend: "mock", StorageMode: "server"}, DB: appDB, Ready: &ready})
 	srv := httptest.NewServer(h)
 	defer srv.Close()
 	limited := false
@@ -521,4 +523,103 @@ func TestReceiptFlow(t *testing.T) {
 	if viaOCR != 2 || withReceipt != 2 {
 		t.Fatalf("transaksi hasil nota harus bersumber 'ocr' dan menaut ke nota: %d/%d", viaOCR, withReceipt)
 	}
+}
+
+// ---------- QoL: edit, filter, ringkasan harian ----------
+
+func TestEditFilterDaily(t *testing.T) {
+	a, _, _, _ := setup(t)
+	_, tokA := a.signup("Bu Sari")
+	_, tokB := a.signup("Pak Budi")
+	bid := a.expect(201, "POST", "/v1/businesses", tokA, map[string]string{"name": "Warung Bu Sari"})["id"].(string)
+	base := "/v1/businesses/" + bid
+
+	var bahan, penjualan, gas string
+	for _, c := range a.expect(200, "GET", base+"/categories", tokA, nil)["categories"].([]any) {
+		m := c.(map[string]any)
+		switch m["name"] {
+		case "Bahan baku":
+			bahan = m["id"].(string)
+		case "Penjualan":
+			penjualan = m["id"].(string)
+		case "Listrik, air, dan gas":
+			gas = m["id"].(string)
+		}
+	}
+	wib, _ := time.LoadLocation("Asia/Jakarta")
+	today := time.Now().In(wib).Format("2006-01-02")
+	yesterday := time.Now().In(wib).AddDate(0, 0, -1).Format("2006-01-02")
+	yTime := time.Now().Add(-24 * time.Hour).UTC().Format(time.RFC3339)
+
+	inc := a.expect(201, "POST", base+"/transactions", tokA, map[string]any{"wallet": "business", "kind": "income", "amount": 100000, "category_id": penjualan, "note": "jual pagi"})
+	exp := a.expect(201, "POST", base+"/transactions", tokA, map[string]any{"wallet": "business", "kind": "expense", "amount": 40000, "category_id": bahan})
+	a.expect(201, "POST", base+"/transactions", tokA, map[string]any{"wallet": "business", "kind": "income", "amount": 50000, "occurred_at": yTime})
+	tr := a.expect(201, "POST", base+"/transfers", tokA, map[string]any{"direction": "to_personal", "amount": 20000, "note": "uang jajan"})
+
+	count := func(q string) int {
+		return len(a.expect(200, "GET", base+"/transactions?"+q, tokA, nil)["transactions"].([]any))
+	}
+	// --- filter ---
+	for q, want := range map[string]int{
+		"": 5, "kind=income": 2, "kind=expense": 1, "kind=transfer": 2,
+		"category_id=" + bahan: 1, "from=" + today + "&to=" + today: 4, "to=" + yesterday: 1, "from=" + yesterday + "&kind=income": 2,
+		"wallet=personal": 1,
+	} {
+		if got := count(q); got != want {
+			t.Errorf("filter %q: dapat %d, mau %d", q, got, want)
+		}
+	}
+	for _, q := range []string{"kind=bogus", "category_id=x", "from=bukan-tanggal", "from=" + today + "&to=" + yesterday} {
+		a.expect(400, "GET", base+"/transactions?"+q, tokA, nil)
+	}
+
+	// --- edit transaksi biasa ---
+	id := exp["id"].(string)
+	up := a.expect(200, "PUT", base+"/transactions/"+id, tokA, map[string]any{"note": "beras 25kg", "category_id": gas})
+	if up["note"] != "beras 25kg" || up["category_name"] != "Listrik, air, dan gas" || up["amount"] != 40000.0 {
+		t.Fatalf("edit gagal / nominal berubah: %v", up)
+	}
+	newDate := time.Now().Add(-48 * time.Hour).UTC().Format(time.RFC3339)
+	up = a.expect(200, "PUT", base+"/transactions/"+id, tokA, map[string]any{"note": "", "category_id": nil, "occurred_at": newDate})
+	if up["note"] != "" || up["category_id"] != nil || up["amount"] != 40000.0 {
+		t.Fatalf("catatan harus terhapus & kategori kosong: %v", up)
+	}
+	// nominal/dompet/jenis tidak boleh ada di permintaan (mass assignment)
+	a.expect(400, "PUT", base+"/transactions/"+id, tokA, map[string]any{"note": "x", "amount": 1})
+	a.expect(400, "PUT", base+"/transactions/"+id, tokA, map[string]any{"note": "x", "wallet": "personal"})
+	// kategori pemasukan tidak cocok untuk pengeluaran
+	a.expect(400, "PUT", base+"/transactions/"+id, tokA, map[string]any{"note": "x", "category_id": penjualan})
+	// pengguna lain tidak boleh
+	a.expect(404, "PUT", base+"/transactions/"+id, tokB, map[string]any{"note": "retas"})
+	a.expect(404, "PUT", base+"/transactions/"+secure.NewUUID(), tokA, map[string]any{"note": "x"})
+
+	// --- edit transfer: catatan dan tanggal berlaku di kedua sisi ---
+	trID := tr["transactions"].([]any)[0].(map[string]any)["id"].(string)
+	a.expect(200, "PUT", base+"/transactions/"+trID, tokA, map[string]any{"note": "ganti catatan", "category_id": penjualan, "occurred_at": yTime})
+	for _, x := range a.expect(200, "GET", base+"/transactions?kind=transfer", tokA, nil)["transactions"].([]any) {
+		m := x.(map[string]any)
+		if m["note"] != "ganti catatan" || m["category_name"] == "Penjualan" {
+			t.Fatalf("kedua sisi transfer harus berubah, kategori tidak: %v", m)
+		}
+	}
+	_ = inc
+
+	// --- ringkasan harian ---
+	days := a.expect(200, "GET", base+"/reports/daily?days=7", tokA, nil)["days"].([]any)
+	if len(days) != 7 {
+		t.Fatalf("harus 7 hari terisi nol, dapat %d", len(days))
+	}
+	lastDay := days[6].(map[string]any)
+	if lastDay["date"] != today || lastDay["income"] != 100000.0 || lastDay["expense"] != 0.0 {
+		// pengeluaran sudah dipindah ke 2 hari lalu oleh edit tanggal di atas
+		t.Fatalf("hari ini salah: %v", lastDay)
+	}
+	if y := days[5].(map[string]any); y["income"] != 50000.0 {
+		t.Fatalf("kemarin salah (transfer tidak boleh dihitung): %v", y)
+	}
+	if d2 := days[4].(map[string]any); d2["expense"] != 40000.0 {
+		t.Fatalf("pengeluaran hasil edit tanggal harus ada 2 hari lalu: %v", d2)
+	}
+	a.expect(400, "GET", base+"/reports/daily?days=40", tokA, nil)
+	a.expect(404, "GET", base+"/reports/daily", tokB, nil)
 }

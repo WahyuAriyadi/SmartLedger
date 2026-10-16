@@ -401,7 +401,8 @@ func (s *Service) Confirm(ctx context.Context, uid, bid, rid string, in ConfirmI
 		if err != nil {
 			return err
 		}
-		if status != "needs_review" {
+		// 'failed' (OCR gagal) tetap boleh dikonfirmasi: pengguna mengisi itemnya manual di layar tinjau.
+		if status != "needs_review" && status != "failed" {
 			return apperr.Conflict("receipt_not_reviewable", "nota ini sudah dikonfirmasi atau belum siap ditinjau")
 		}
 		wid, err := ledger.WalletID(ctx, tx, bid, in.Wallet)

@@ -1,0 +1,14 @@
+{
+  "name": "smartledger-web-tests",
+  "private": true,
+  "description": "Tes antarmuka & penyimpanan di perangkat (tanpa browser: jsdom + fake-indexeddb + WebCrypto Node)",
+  "scripts": {
+    "test:local": "node --test local.test.js",
+    "test:device": "node ui.device.test.js",
+    "test:server": "node ui.server.test.js"
+  },
+  "devDependencies": {
+    "fake-indexeddb": "^6.0.0",
+    "jsdom": "^24.0.0"
+  }
+}

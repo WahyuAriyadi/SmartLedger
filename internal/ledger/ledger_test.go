@@ -47,3 +47,42 @@ func TestCursorRoundTrip(t *testing.T) {
 		}
 	}
 }
+
+func TestUpdateValidation(t *testing.T) {
+	now := time.Now()
+	bad := "bukan-uuid"
+	future, past := now.Add(72*time.Hour), now.AddDate(-6, 0, 0)
+	if err := (&UpdateTransaction{Note: "ok"}).Validate(now); err != nil {
+		t.Fatalf("input valid ditolak: %v", err)
+	}
+	for name, in := range map[string]UpdateTransaction{
+		"catatan panjang": {Note: strings.Repeat("a", MaxNoteLen+1)},
+		"kategori rusak":  {CategoryID: &bad},
+		"tanggal depan":   {OccurredAt: &future},
+		"tanggal lampau":  {OccurredAt: &past},
+	} {
+		if in.Validate(now) == nil {
+			t.Errorf("%s harus ditolak", name)
+		}
+	}
+}
+
+func TestDayBounds(t *testing.T) {
+	s := &Service{loc: time.FixedZone("WIB", 7*3600)}
+	f, to, err := s.dayBounds("2026-10-01", "2026-10-31")
+	if err != nil || !f.Valid || !to.Valid {
+		t.Fatalf("rentang valid ditolak: %v", err)
+	}
+	if got := to.Time.Sub(f.Time); got != 31*24*time.Hour {
+		t.Fatalf("akhir harus inklusif (awal hari berikutnya): %v", got)
+	}
+	if _, _, err := s.dayBounds("2026-10-31", "2026-10-01"); err == nil {
+		t.Fatal("tanggal akhir sebelum awal harus ditolak")
+	}
+	if _, _, err := s.dayBounds("31/10/2026", ""); err == nil {
+		t.Fatal("format salah harus ditolak")
+	}
+	if f, to, err := s.dayBounds("", ""); err != nil || f.Valid || to.Valid {
+		t.Fatal("tanpa batas harus lolos")
+	}
+}

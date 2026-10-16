@@ -1,6 +1,6 @@
-# Tambahan KHUSUS pengembangan: membuka PostgreSQL ke localhost saja (bukan jaringan) supaya
+# Tambahan KHUSUS pengembangan mode server: membuka PostgreSQL ke localhost saja (bukan jaringan) supaya
 # `go test ./...` dan alat seperti psql/DBeaver di Windows bisa terhubung.
-#   docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d db
+#   docker compose -f docker-compose.yml -f docker-compose.server.yml -f docker-compose.dev.yml up -d db migrate
 services:
   db:
     ports:

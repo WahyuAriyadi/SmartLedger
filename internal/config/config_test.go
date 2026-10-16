@@ -12,7 +12,7 @@ func env(m map[string]string) func(string) string { return func(k string) string
 
 func valid() map[string]string {
 	return map[string]string{
-		"DATABASE_URL": "postgres://x", "DATA_KEYS": "1:" + b64(32), "DATA_KEY_ACTIVE": "1", "PHONE_PEPPER": b64(32),
+		"STORAGE_MODE": "server", "DATABASE_URL": "postgres://x", "DATA_KEYS": "1:" + b64(32), "DATA_KEY_ACTIVE": "1", "PHONE_PEPPER": b64(32),
 	}
 }
 
@@ -21,7 +21,7 @@ func TestLoadValidAndDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.Addr != ":8080" || c.StorageBackend != "local" || c.OCRBackend != "mock" || c.MaxFailedLogins != 5 {
+	if c.StorageMode != "server" || c.Addr != ":8080" || c.StorageBackend != "local" || c.OCRBackend != "mock" || c.MaxFailedLogins != 5 {
 		t.Fatalf("default tidak sesuai: %+v", c)
 	}
 }
@@ -49,8 +49,24 @@ func TestLoadFailsFast(t *testing.T) {
 }
 
 func TestLoadReportsAllProblemsAtOnce(t *testing.T) {
-	_, err := Load(env(map[string]string{}))
+	_, err := Load(env(map[string]string{"STORAGE_MODE": "server"}))
 	if err == nil || !strings.Contains(err.Error(), "DATABASE_URL") || !strings.Contains(err.Error(), "PHONE_PEPPER") {
 		t.Fatalf("semua masalah konfigurasi harus dilaporkan sekaligus: %v", err)
+	}
+}
+
+func TestDeviceModeIsDefaultAndNeedsNoServerSecrets(t *testing.T) {
+	c, err := Load(env(map[string]string{}))
+	if err != nil {
+		t.Fatalf("mode device tidak boleh butuh database/kunci: %v", err)
+	}
+	if c.StorageMode != "device" || c.OCRDailyCap != 300 || c.OCRAccessCode != "" {
+		t.Fatalf("default device salah: %+v", c)
+	}
+	if _, err := Load(env(map[string]string{"STORAGE_MODE": "awan"})); err == nil {
+		t.Fatal("mode tidak dikenal harus ditolak")
+	}
+	if _, err := Load(env(map[string]string{"OCR_DAILY_CAP": "banyak"})); err == nil {
+		t.Fatal("OCR_DAILY_CAP bukan angka harus ditolak")
 	}
 }

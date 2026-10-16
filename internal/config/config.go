@@ -14,6 +14,16 @@ import (
 )
 
 type Config struct {
+	// StorageMode menentukan di mana data pengguna disimpan:
+	//   device (default): data keuangan hanya ada di perangkat pengguna (terenkripsi); server tanpa database,
+	//                     hanya menyajikan aplikasi dan menjadi gerbang OCR tanpa menyimpan apa pun.
+	//   server: mode lama dengan akun dan PostgreSQL.
+	StorageMode string
+
+	// Gerbang OCR (mode device).
+	OCRAccessCode string // kosong = tidak diwajibkan
+	OCRDailyCap   int    // batas total panggilan OCR per hari (pengaman biaya)
+
 	Addr             string
 	DatabaseURL      string // role ledger_app (terkena RLS)
 	DataKeys         map[string][]byte
@@ -58,6 +68,9 @@ func Load(getenv func(string) string) (Config, error) {
 	fail := func(f string, a ...any) { errs = append(errs, fmt.Errorf(f, a...)) }
 
 	c := Config{
+		StorageMode:      str(getenv, "STORAGE_MODE", "device"),
+		OCRAccessCode:    getenv("OCR_ACCESS_CODE"),
+		OCRDailyCap:      num(getenv, "OCR_DAILY_CAP", 300, fail),
 		Addr:             str(getenv, "ADDR", ":8080"),
 		DatabaseURL:      getenv("DATABASE_URL"),
 		ActiveKeyID:      getenv("DATA_KEY_ACTIVE"),
@@ -90,27 +103,31 @@ func Load(getenv func(string) string) (Config, error) {
 	// CLOUD: if c.OCRBackend == "vertex" && c.VertexProject == "" {
 	// CLOUD: 	fail("VERTEX_PROJECT wajib diisi bila OCR_BACKEND=vertex")
 	// CLOUD: }
-	if c.DatabaseURL == "" {
-		fail("DATABASE_URL wajib diisi")
-	}
-
-	keys, err := parseKeys(getenv("DATA_KEYS"))
-	if err != nil {
-		fail("DATA_KEYS: %v", err)
-	}
-	c.DataKeys = keys
-	if _, ok := keys[c.ActiveKeyID]; !ok {
-		fail("DATA_KEY_ACTIVE %q tidak ada di DATA_KEYS", c.ActiveKeyID)
-	}
-
-	pepper, err := base64.StdEncoding.DecodeString(getenv("PHONE_PEPPER"))
-	if err != nil || len(pepper) < 32 {
-		fail("PHONE_PEPPER wajib base64 dengan panjang minimal 32 byte (buat dengan: ledger genkey)")
-	}
-	c.PhonePepper = pepper
-
-	if c.MaxFailedLogins < 3 {
-		fail("MAX_FAILED_LOGINS minimal 3")
+	switch c.StorageMode {
+	case "device":
+		// Tanpa database: tidak ada rahasia server yang melindungi data pengguna, karena memang tidak ada datanya.
+	case "server":
+		if c.DatabaseURL == "" {
+			fail("DATABASE_URL wajib diisi pada STORAGE_MODE=server")
+		}
+		keys, err := parseKeys(getenv("DATA_KEYS"))
+		if err != nil {
+			fail("DATA_KEYS: %v", err)
+		}
+		c.DataKeys = keys
+		if _, ok := keys[c.ActiveKeyID]; !ok {
+			fail("DATA_KEY_ACTIVE %q tidak ada di DATA_KEYS", c.ActiveKeyID)
+		}
+		pepper, err := base64.StdEncoding.DecodeString(getenv("PHONE_PEPPER"))
+		if err != nil || len(pepper) < 32 {
+			fail("PHONE_PEPPER wajib base64 dengan panjang minimal 32 byte (buat dengan: ledger genkey)")
+		}
+		c.PhonePepper = pepper
+		if c.MaxFailedLogins < 3 {
+			fail("MAX_FAILED_LOGINS minimal 3")
+		}
+	default:
+		fail("STORAGE_MODE %q tidak dikenal (device | server)", c.StorageMode)
 	}
 	return c, errors.Join(errs...)
 }

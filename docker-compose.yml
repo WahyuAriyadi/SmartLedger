@@ -1,39 +1,16 @@
-# Menjalankan SELURUH aplikasi di komputer lokal: PostgreSQL + migrasi + API + antarmuka web.
-# Tanpa layanan cloud apa pun. Buka http://localhost:8080 setelah `docker compose up`.
+# Mode PERANGKAT (default): data keuangan tersimpan terenkripsi di HP/browser pengguna. Server hanya menyajikan
+# aplikasi dan menjadi gerbang OCR tanpa penyimpanan. TIDAK ada database, TIDAK ada volume data.
+#   docker compose up --build -d      ->  http://localhost:8080
+#
+# Mode server lama (akun + PostgreSQL): tambahkan docker-compose.server.yml
+#   docker compose -f docker-compose.yml -f docker-compose.server.yml up --build -d
+#
+# CATATAN: fitur penyimpanan aman di browser (WebCrypto) hanya jalan di HTTPS atau http://localhost.
+# Membuka lewat IP jaringan (http://192.168.x.x:8080) dari HP akan DITOLAK browser. Untuk uji di HP gunakan
+# terowongan HTTPS (mis. cloudflared/ngrok) atau `adb reverse tcp:8080 tcp:8080` lalu buka http://localhost:8080 di HP.
 name: smartledger
 
 services:
-  db:
-    image: postgres:16-alpine
-    environment:
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?jalankan scripts/init-env.ps1 dulu}
-      POSTGRES_DB: ledger
-    volumes:
-      - pgdata:/var/lib/postgresql/data
-      # Membuat role aplikasi `ledger_app` (bukan superuser, tunduk pada RLS). Hanya jalan saat volume baru.
-      - ./deploy/initdb:/docker-entrypoint-initdb.d:ro
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d ledger"]
-      interval: 3s
-      timeout: 3s
-      retries: 20
-    restart: unless-stopped
-    # Port 5432 sengaja TIDAK dipublikasikan: hanya container lain yang bisa menjangkau database.
-    # Untuk menjalankan tes integrasi dari Windows, lihat docker-compose.dev.yml.
-
-  migrate:
-    build: .
-    image: smartledger:local
-    command: ["migrate"]
-    environment:
-      # Pemilik skema, hanya dipakai sebentar untuk migrasi; API tidak pernah memakai kredensial ini.
-      MIGRATE_DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD}@db:5432/ledger?sslmode=disable
-    depends_on:
-      db:
-        condition: service_healthy
-    restart: "no"
-
   api:
     build: .
     image: smartledger:local
@@ -41,25 +18,14 @@ services:
       - "127.0.0.1:8080:8080" # hanya bisa diakses dari komputer ini
     environment:
       ADDR: ":8080"
-      # Role terbatas: tanpa DELETE, tanpa akses langsung ke tabel sesi, tunduk pada Row Level Security.
-      DATABASE_URL: postgres://ledger_app:ledger_app_dev@db:5432/ledger?sslmode=disable
-      DATA_KEYS: ${DATA_KEYS:?jalankan scripts/init-env.ps1 dulu}
-      DATA_KEY_ACTIVE: ${DATA_KEY_ACTIVE:-1}
-      PHONE_PEPPER: ${PHONE_PEPPER:?jalankan scripts/init-env.ps1 dulu}
-      STORAGE_BACKEND: local
-      OCR_BACKEND: mock
+      STORAGE_MODE: device
+      OCR_BACKEND: mock # OCR tiruan lokal; produksi: vertex (lihat README, bagian migrasi ke cloud)
+      OCR_ACCESS_CODE: ${OCR_ACCESS_CODE:-} # opsional: kode yang harus dikirim klien untuk memakai OCR
+      OCR_DAILY_CAP: ${OCR_DAILY_CAP:-300} # pengaman biaya: total panggilan OCR per hari
       # --- Padanan untuk Cloud Run (diisi lewat Terraform, bukan compose); lihat README bagian "Migrasi ke cloud" ---
       # CLOUD: TRUSTED_PROXY_HOPS: "1"
-      # CLOUD: DATABASE_URL: postgres://ledger_app:<dari Secret Manager>@/ledger?host=/cloudsql/PROJECT:REGION:INSTANCE&sslmode=disable
-      # CLOUD: STORAGE_BACKEND: gcs        (+ GCS_BUCKET)
       # CLOUD: OCR_BACKEND: vertex         (+ VERTEX_PROJECT, VERTEX_LOCATION, VERTEX_MODEL)
-    volumes:
-      - receipts:/data/receipts
-    depends_on:
-      db:
-        condition: service_healthy
-      migrate:
-        condition: service_completed_successfully
+      # CLOUD: OCR_ACCESS_CODE: <dari Secret Manager>
     healthcheck:
       test: ["CMD", "/ledger", "healthcheck"]
       interval: 10s
@@ -67,7 +33,7 @@ services:
       retries: 3
       start_period: 5s
     restart: unless-stopped
-    # Hardening container: filesystem read-only (hanya volume foto yang bisa ditulis), tanpa capability.
+    # Hardening container: filesystem read-only, tanpa capability. Tidak ada yang ditulis ke disk.
     read_only: true
     tmpfs:
       - /tmp
@@ -75,7 +41,3 @@ services:
       - ALL
     security_opt:
       - no-new-privileges:true
-
-volumes:
-  pgdata:
-  receipts:

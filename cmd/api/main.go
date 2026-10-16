@@ -74,11 +74,15 @@ func serve(log *slog.Logger) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	database, err := db.Open(ctx, cfg.DatabaseURL, db.Options{MaxOpen: cfg.DBMaxOpen, MaxIdle: cfg.DBMaxIdle})
-	if err != nil {
-		return err
+	// Mode device: tidak ada database (data ada di perangkat pengguna). Mode server: PostgreSQL.
+	var database *db.DB
+	if cfg.StorageMode == "server" {
+		database, err = db.Open(ctx, cfg.DatabaseURL, db.Options{MaxOpen: cfg.DBMaxOpen, MaxIdle: cfg.DBMaxIdle})
+		if err != nil {
+			return err
+		}
+		defer database.Close()
 	}
-	defer database.Close()
 
 	var ready atomic.Bool
 	ready.Store(true)
@@ -98,7 +102,7 @@ func serve(log *slog.Logger) error {
 	}
 	errc := make(chan error, 1)
 	go func() {
-		log.Info("server berjalan", "addr", cfg.Addr)
+		log.Info("server berjalan", "addr", cfg.Addr, "mode", cfg.StorageMode)
 		errc <- srv.ListenAndServe()
 	}()
 

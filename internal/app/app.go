@@ -31,6 +31,9 @@ type Deps struct {
 }
 
 func New(d Deps) (http.Handler, error) {
+	if d.Cfg.StorageMode == "device" {
+		return newDevice(d)
+	}
 	cipher, err := secure.NewCipher(d.Cfg.DataKeys, d.Cfg.ActiveKeyID)
 	if err != nil {
 		return nil, err
@@ -79,6 +82,8 @@ func New(d Deps) (http.Handler, error) {
 	ui := web.Handler()
 	mux.Handle("GET /{$}", ui)
 	mux.Handle("GET /assets/{file}", ui)
+	mux.Handle("GET /sw.js", ui)
+	mux.Handle("GET /manifest.webmanifest", ui)
 
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { // liveness: proses hidup
 		w.WriteHeader(http.StatusOK)
@@ -92,16 +97,24 @@ func New(d Deps) (http.Handler, error) {
 		}
 		w.WriteHeader(http.StatusOK)
 	})
+	mux.HandleFunc("GET /v1/config", func(w http.ResponseWriter, r *http.Request) {
+		_ = httpx.WriteJSON(w, http.StatusOK, map[string]any{"mode": "server"})
+	})
 	mux.Handle("/", httpx.Handle(func(w http.ResponseWriter, r *http.Request) error {
 		return apperr.NotFound("endpoint tidak ditemukan")
 	}))
 
-	return httpx.Chain(mux,
+	return middlewareChain(mux, d.Cfg, global.Middleware(ip)), nil
+}
+
+// middlewareChain adalah lapisan umum untuk kedua mode (urutan penting: yang pertama paling luar).
+func middlewareChain(h http.Handler, cfg config.Config, limiter httpx.Middleware) http.Handler {
+	return httpx.Chain(h,
 		httpx.RequestID,
 		httpx.Recover,
-		httpx.AccessLog(d.Cfg.TrustedProxyHops),
+		httpx.AccessLog(cfg.TrustedProxyHops),
 		httpx.SecurityHeaders,
-		httpx.Timeout(d.Cfg.RequestTimeout),
-		global.Middleware(ip),
-	), nil
+		httpx.Timeout(cfg.RequestTimeout),
+		limiter,
+	)
 }

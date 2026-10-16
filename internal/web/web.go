@@ -17,10 +17,10 @@ var files embed.FS
 // 'unsafe-eval' dibutuhkan build penuh Vue (kompiler template di browser). Tanpa 'unsafe-inline':
 // script/style sisipan tetap diblokir. Untuk CSP tanpa eval, precompile template (butuh build step).
 const uiCSP = "default-src 'none'; script-src 'self' 'unsafe-eval'; style-src 'self'; img-src 'self' blob: data:; " +
-	"connect-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
+	"connect-src 'self'; manifest-src 'self'; worker-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
 
 var contentTypes = map[string]string{
-	".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8", ".svg": "image/svg+xml",
+	".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8", ".svg": "image/svg+xml", ".png": "image/png",
 }
 
 // Handler menyajikan index.html di "/" dan berkas di bawah /assets/ (allowlist ekstensi,
@@ -40,6 +40,13 @@ func Handler() http.Handler {
 		http.ServeContent(w, r, name, start, strings.NewReader(string(b)))
 	}
 	mux := http.NewServeMux()
+	// Service worker harus dilayani dari root agar cakupannya seluruh aplikasi; manifest untuk "Pasang ke layar utama".
+	mux.HandleFunc("GET /sw.js", func(w http.ResponseWriter, r *http.Request) {
+		serve(w, r, "sw.js", "text/javascript; charset=utf-8")
+	})
+	mux.HandleFunc("GET /manifest.webmanifest", func(w http.ResponseWriter, r *http.Request) {
+		serve(w, r, "manifest.webmanifest", "application/manifest+json")
+	})
 	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
 		serve(w, r, "index.html", "text/html; charset=utf-8")
 	})

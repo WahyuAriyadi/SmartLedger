@@ -6,15 +6,86 @@
   <meta name="theme-color" content="#0f766e">
   <title>Buku Kas Pintar</title>
   <link rel="icon" href="/assets/icon.svg" type="image/svg+xml">
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="apple-touch-icon" href="/assets/icon-192.png">
   <link rel="stylesheet" href="/assets/style.css">
 </head>
 <body>
 <div id="app" v-cloak>
   <main class="shell">
-    <div v-if="toast" class="toast" :class="toast.kind" role="status">{{ toast.text }}</div>
+    <div v-if="toast" class="toast" :class="toast.kind" role="status">
+      <span>{{ toast.text }}</span>
+      <button v-if="toast.action" class="toast-btn" @click="toast.action.fn()">{{ toast.action.label }}</button>
+    </div>
 
-    <!-- MASUK / DAFTAR -->
-    <section v-if="!token" class="card auth">
+    <p v-if="screen === 'boot'" class="muted center">Memuat...</p>
+
+    <section v-else-if="screen === 'fatal'" class="card">
+      <h1>Tidak bisa dibuka</h1>
+      <p class="alert danger">{{ fatal }}</p>
+    </section>
+
+    <!-- ONBOARDING (mode perangkat): buat PIN, simpan kode pemulihan -->
+    <section v-else-if="screen === 'onboard'" class="card">
+      <template v-if="onboard.step === 1">
+        <h1>Buku Kas Pintar</h1>
+        <p class="muted">Datamu disimpan <strong>terenkripsi di HP ini saja</strong>, bukan di server. Buat PIN untuk mengunci data.</p>
+        <form @submit.prevent="onboardCreate">
+          <label>Nama panggilan (opsional)
+            <input v-model.trim="onboard.name" maxlength="40" autocomplete="nickname">
+          </label>
+          <label>PIN atau kata sandi
+            <input v-model="onboard.pin" type="password" autocomplete="new-password" maxlength="64" required>
+          </label>
+          <p v-if="onboard.pin" class="meter" :class="'m' + pinStrength.score">{{ pinStrength.label }}</p>
+          <label>Ulangi PIN
+            <input v-model="onboard.pin2" type="password" autocomplete="new-password" maxlength="64" required>
+          </label>
+          <p class="muted small">Tips: PIN angka 6 digit gampang ditebak bila HP jatuh ke tangan orang lain. Kata sandi 8+ karakter dengan huruf jauh lebih aman.</p>
+          <button class="btn primary" :disabled="busy">Buat brankas</button>
+        </form>
+        <button class="link" type="button" @click="openRestore">Sudah punya cadangan? Pulihkan</button>
+      </template>
+      <template v-else>
+        <h1>Simpan kode pemulihan</h1>
+        <p class="alert warn">Kode ini satu-satunya jalan masuk bila kamu lupa PIN. Tanpa PIN dan tanpa kode ini, data <strong>tidak bisa dibuka siapa pun</strong>, termasuk kami.</p>
+        <div class="codebox" aria-label="Kode pemulihan">{{ onboard.recovery }}</div>
+        <div class="two">
+          <button class="btn" type="button" @click="copyRecovery(onboard.recovery)">Salin</button>
+          <button class="btn" type="button" @click="downloadRecovery(onboard.recovery)">Unduh .txt</button>
+        </div>
+        <label class="check"><input type="checkbox" v-model="onboard.saved"> Saya sudah menyimpan kode ini di tempat aman</label>
+        <button class="btn primary" :disabled="busy || !onboard.saved" @click="onboardFinish">Lanjut</button>
+      </template>
+    </section>
+
+    <!-- PULIHKAN DARI CADANGAN -->
+    <section v-else-if="screen === 'restore'" class="card">
+      <h1>Pulihkan dari cadangan</h1>
+      <p class="muted">Pilih file cadangan (.bkp), lalu masukkan PIN atau kode pemulihan yang berlaku saat cadangan dibuat.</p>
+      <label class="file">
+        <input type="file" accept=".bkp,application/octet-stream,application/json" @change="onBackupFile" :disabled="busy">
+        <span class="btn">{{ rs.summary ? 'Ganti file' : 'Pilih file cadangan' }}</span>
+      </label>
+      <div v-if="rs.summary" class="alert good small">
+        Cadangan valid: {{ rs.summary.records }} catatan<span v-if="rs.summary.images">, {{ rs.summary.images }} foto</span>, dibuat {{ fmtDateTime(rs.summary.created) }}.
+      </div>
+      <form v-if="rs.summary" @submit.prevent="doRestore">
+        <label v-if="!rs.useRecovery">PIN saat cadangan dibuat
+          <input v-model="rs.pin" type="password" autocomplete="current-password" maxlength="64" required>
+        </label>
+        <label v-else>Kode pemulihan
+          <input v-model="rs.recovery" autocomplete="off" autocapitalize="characters" maxlength="50" placeholder="XXXX-XXXX-XXXX-..." required>
+        </label>
+        <button class="link" type="button" @click="rs.useRecovery = !rs.useRecovery">{{ rs.useRecovery ? 'Pakai PIN' : 'Lupa PIN? Pakai kode pemulihan' }}</button>
+        <label v-if="deviceState !== 'none'" class="check"><input type="checkbox" v-model="rs.ack"> Saya paham: SEMUA data di perangkat ini akan diganti isi cadangan</label>
+        <button class="btn primary" :disabled="busy">Pulihkan</button>
+      </form>
+      <button class="link" type="button" @click="closeRestore">Batal</button>
+    </section>
+
+    <!-- MASUK / DAFTAR (mode server) -->
+    <section v-else-if="screen === 'auth'" class="card auth">
       <h1>Buku Kas Pintar</h1>
       <p class="muted">Pisahkan uang usaha dan uang pribadi, supaya kas tidak "bocor".</p>
       <form @submit.prevent="submitAuth">
@@ -35,8 +106,48 @@
       </button>
     </section>
 
+    <!-- LAYAR TERKUNCI -->
+    <section v-else-if="screen === 'lock' && mode === 'device'" class="card lock">
+      <h1>Buku Kas terkunci</h1>
+      <p class="muted">Data kas hanya ada di HP ini dan terenkripsi. Masukkan PIN untuk membukanya.</p>
+      <form @submit.prevent="deviceUnlock">
+        <template v-if="!lockForm.useRecovery">
+          <label>PIN
+            <input v-model="lockForm.pin" type="password" autocomplete="current-password" maxlength="64" required autofocus>
+          </label>
+        </template>
+        <template v-else>
+          <label>Kode pemulihan
+            <input v-model="lockForm.recovery" autocomplete="off" autocapitalize="characters" maxlength="50" placeholder="XXXX-XXXX-XXXX-..." required>
+          </label>
+          <label>PIN baru
+            <input v-model="lockForm.newPin" type="password" autocomplete="new-password" maxlength="64" required>
+          </label>
+          <p v-if="lockForm.newPin" class="meter" :class="'m' + lockNewStrength.score">{{ lockNewStrength.label }}</p>
+          <label>Ulangi PIN baru
+            <input v-model="lockForm.newPin2" type="password" autocomplete="new-password" maxlength="64" required>
+          </label>
+        </template>
+        <button class="btn primary" :disabled="busy">{{ lockForm.useRecovery ? 'Pulihkan akses' : 'Buka kunci' }}</button>
+      </form>
+      <button class="link" type="button" @click="lockForm.useRecovery = !lockForm.useRecovery">{{ lockForm.useRecovery ? 'Kembali ke PIN' : 'Lupa PIN? Pakai kode pemulihan' }}</button>
+      <button class="link" type="button" @click="openRestore">Pulihkan dari file cadangan</button>
+    </section>
+
+    <section v-else-if="screen === 'lock'" class="card lock">
+      <h1>Layar terkunci</h1>
+      <p class="muted">Demi keamanan data kas, masukkan PIN untuk melanjutkan.</p>
+      <form @submit.prevent="unlock">
+        <label>PIN
+          <input v-model="lockPin" type="password" inputmode="numeric" autocomplete="current-password" maxlength="64" required>
+        </label>
+        <button class="btn primary" :disabled="busy || !me">Buka kunci</button>
+      </form>
+      <button class="link" type="button" @click="logout">Keluar</button>
+    </section>
+
     <!-- BUAT USAHA PERTAMA -->
-    <section v-else-if="loaded && !business" class="card">
+    <section v-else-if="screen === 'setup'" class="card">
       <h1>Usaha kamu</h1>
       <p class="muted">Dompet Usaha dan Dompet Pribadi akan dibuat otomatis.</p>
       <form @submit.prevent="createBusiness">
@@ -54,17 +165,21 @@
         </label>
         <button class="btn primary" :disabled="busy">Mulai</button>
       </form>
-      <button class="link" type="button" @click="logout">Keluar</button>
+      <button v-if="mode === 'server'" class="link" type="button" @click="logout">Keluar</button>
+      <button v-else class="link" type="button" @click="lockNow">Kunci</button>
     </section>
 
     <!-- APLIKASI -->
-    <template v-else-if="business">
+    <template v-else-if="screen === 'app'">
       <header class="top">
         <div>
           <div class="muted small">{{ business.name }}</div>
           <strong>Halo, {{ me && me.name }}</strong>
         </div>
-        <button class="link" @click="logout">Keluar</button>
+        <div class="top-actions">
+          <button class="icon" @click="lockNow" aria-label="Kunci layar" title="Kunci layar">Kunci</button>
+          <button v-if="mode === 'server'" class="icon" @click="logout" aria-label="Keluar">Keluar</button>
+        </div>
       </header>
 
       <!-- BERANDA -->
@@ -73,9 +188,22 @@
           <button :class="{ on: walletView === 'business' }" @click="setWalletView('business')">Usaha</button>
           <button :class="{ on: walletView === 'personal' }" @click="setWalletView('personal')">Pribadi</button>
         </div>
-        <div class="card">
-          <div class="muted small">Saldo dompet {{ walletView === 'business' ? 'usaha' : 'pribadi' }}</div>
-          <div class="big" :class="{ neg: currentBalance < 0 }">{{ rp(currentBalance) }}</div>
+
+        <div v-if="mode === 'device' && backupNeeded" class="alert warn">
+          Data kamu hanya ada di HP ini. Sudah {{ backupInfo.changes }} perubahan sejak cadangan terakhir ({{ fmtDateTime(backupInfo.last) }}).
+          <button class="link" @click="go('more')">Cadangkan sekarang</button>
+        </div>
+        <div v-if="!wallets.length" class="card skeleton" aria-hidden="true"></div>
+        <div v-else class="card">
+          <div class="row-between">
+            <div class="muted small">Saldo dompet {{ walletView === 'business' ? 'usaha' : 'pribadi' }}</div>
+            <button class="icon" @click="toggleHide" :aria-label="hideBalance ? 'Tampilkan saldo' : 'Sembunyikan saldo'">{{ hideBalance ? 'Tampilkan' : 'Sembunyikan' }}</button>
+          </div>
+          <div class="big" :class="{ neg: currentBalance < 0 && !hideBalance }">{{ mask(currentBalance) }}</div>
+          <div v-if="walletView === 'business' && today" class="today">
+            <span class="pos">Masuk hari ini {{ mask(today.income) }}</span>
+            <span class="neg">Keluar {{ mask(today.expense) }}</span>
+          </div>
         </div>
 
         <div v-if="homeReport && homeReport.leak_detected" class="alert danger">
@@ -90,20 +218,67 @@
           Bulan ini kamu untung {{ rp(homeReport.profit) }}. Siap nabung?
         </div>
 
-        <h2>Riwayat</h2>
-        <p v-if="!txs.length" class="muted">Belum ada transaksi. Mulai dari tab "Catat".</p>
-        <ul class="list">
-          <li v-for="t in txs" :key="t.id">
-            <div>
-              <div>{{ t.category_name || (t.direction === 'in' ? 'Pemasukan' : 'Pengeluaran') }}</div>
-              <div class="muted small">{{ fmtDate(t.occurred_at) }} · {{ t.wallet === 'business' ? 'Usaha' : 'Pribadi' }}<span v-if="t.note"> · {{ t.note }}</span></div>
+        <div v-if="walletView === 'business' && daily.length" class="card">
+          <div class="muted small">7 hari terakhir (usaha)</div>
+          <div class="week" role="img" aria-label="Grafik pemasukan dan pengeluaran 7 hari terakhir">
+            <div v-for="d in daily" :key="d.date" class="day">
+              <div class="pair">
+                <div class="b in" :style="{ height: barPct(d.income) }"></div>
+                <div class="b out" :style="{ height: barPct(d.expense) }"></div>
+              </div>
+              <div class="dl">{{ weekday(d.date) }}</div>
             </div>
-            <div class="amt" :class="t.direction">
-              {{ t.direction === 'in' ? '+' : '-' }}{{ rp(t.amount) }}
-              <button class="x" @click="removeTx(t)" aria-label="Hapus transaksi">&times;</button>
-            </div>
-          </li>
-        </ul>
+          </div>
+          <div class="muted small">Hijau: masuk. Merah: keluar.</div>
+        </div>
+
+        <div class="row-between">
+          <h2>Riwayat</h2>
+          <button class="icon" @click="load(refreshMoney)" aria-label="Segarkan data">Segarkan</button>
+        </div>
+
+        <input v-model.trim="filters.q" class="search" type="search" placeholder="Cari di riwayat yang tampil (kategori, catatan, nominal)" aria-label="Cari riwayat">
+        <div class="chips" role="group" aria-label="Filter jenis">
+          <button class="chip" :class="{ on: filters.kind === '' }" @click="setKindFilter('')">Semua</button>
+          <button class="chip" :class="{ on: filters.kind === 'income' }" @click="setKindFilter('income')">Masuk</button>
+          <button class="chip" :class="{ on: filters.kind === 'expense' }" @click="setKindFilter('expense')">Keluar</button>
+          <button class="chip" :class="{ on: filters.kind === 'transfer' }" @click="setKindFilter('transfer')">Pindah</button>
+        </div>
+        <details class="filters" :open="filtersActive">
+          <summary>Filter lanjutan{{ filtersActive ? ' (aktif)' : '' }}</summary>
+          <label>Kategori
+            <select v-model="filters.category_id" @change="load(() => loadTxs(false))">
+              <option value="">Semua kategori</option>
+              <option v-for="c in categories" :key="c.id" :value="c.id">{{ c.name }}</option>
+            </select>
+          </label>
+          <div class="two">
+            <label>Dari tanggal<input type="date" v-model="filters.from" @change="load(() => loadTxs(false))"></label>
+            <label>Sampai<input type="date" v-model="filters.to" @change="load(() => loadTxs(false))"></label>
+          </div>
+          <button class="link" type="button" @click="resetFilters">Reset filter</button>
+        </details>
+
+        <p v-if="!txs.length" class="muted">{{ filtersActive ? 'Tidak ada transaksi yang cocok dengan filter.' : 'Belum ada transaksi. Mulai dari tab "Catat".' }}</p>
+        <p v-else-if="!groups.length" class="muted">Tidak ada hasil untuk "{{ filters.q }}" pada riwayat yang tampil.</p>
+        <section v-for="g in groups" :key="g.key" class="group">
+          <div class="group-h">
+            <strong>{{ g.label }}</strong>
+            <span class="muted small">
+              <span v-if="g.income" class="pos">+{{ rp(g.income) }}</span>
+              <span v-if="g.expense" class="neg"> -{{ rp(g.expense) }}</span>
+            </span>
+          </div>
+          <ul class="list">
+            <li v-for="t in g.items" :key="t.id" role="button" tabindex="0" @click="openSheet(t)" @keydown.enter="openSheet(t)">
+              <div>
+                <div>{{ t.category_name || (t.direction === 'in' ? 'Pemasukan' : 'Pengeluaran') }}</div>
+                <div class="muted small">{{ fmtTime(t.occurred_at) }} · {{ t.wallet === 'business' ? 'Usaha' : 'Pribadi' }}<span v-if="t.note"> · {{ t.note }}</span></div>
+              </div>
+              <div class="amt" :class="t.direction">{{ t.direction === 'in' ? '+' : '-' }}{{ rp(t.amount) }}</div>
+            </li>
+          </ul>
+        </section>
         <button v-if="nextCursor" class="btn" :disabled="busy" @click="loadMore">Muat lebih banyak</button>
       </template>
 
@@ -122,8 +297,12 @@
             </select>
           </label>
           <label>Nominal (Rp)
-            <input v-model.number="form.amount" type="number" inputmode="numeric" min="1" step="1" required>
+            <input class="amount" :value="money(form.amount)" @input="onMoney($event, form, 'amount')" inputmode="numeric" autocomplete="off" placeholder="0" required>
           </label>
+          <div class="chips" aria-label="Nominal cepat">
+            <button v-for="n in quick" :key="n" type="button" class="chip" @click="addAmount(form, 'amount', n)">+{{ shortRp(n) }}</button>
+            <button type="button" class="chip" @click="form.amount = null">Hapus</button>
+          </div>
           <label>Kategori
             <select v-model="form.category_id">
               <option value="">(tanpa kategori)</option>
@@ -133,7 +312,7 @@
           <label>Catatan (opsional)
             <input v-model.trim="form.note" maxlength="280">
           </label>
-          <button class="btn primary" :disabled="busy">Simpan</button>
+          <button class="btn primary" :disabled="busy || !form.amount">Simpan</button>
         </form>
 
         <form class="card" @submit.prevent="submitTransfer">
@@ -144,12 +323,16 @@
             <button type="button" :class="{ on: transfer.direction === 'to_business' }" @click="transfer.direction = 'to_business'">Pribadi &rarr; Usaha</button>
           </div>
           <label>Nominal (Rp)
-            <input v-model.number="transfer.amount" type="number" inputmode="numeric" min="1" step="1" required>
+            <input class="amount" :value="money(transfer.amount)" @input="onMoney($event, transfer, 'amount')" inputmode="numeric" autocomplete="off" placeholder="0" required>
           </label>
+          <div class="chips" aria-label="Nominal cepat">
+            <button v-for="n in quick" :key="n" type="button" class="chip" @click="addAmount(transfer, 'amount', n)">+{{ shortRp(n) }}</button>
+            <button type="button" class="chip" @click="transfer.amount = null">Hapus</button>
+          </div>
           <label>Catatan (opsional)
             <input v-model.trim="transfer.note" maxlength="280">
           </label>
-          <button class="btn" :disabled="busy">Pindahkan</button>
+          <button class="btn" :disabled="busy || !transfer.amount">Pindahkan</button>
         </form>
       </template>
 
@@ -232,21 +415,166 @@
           <div v-if="report && report.leak_detected" class="alert danger">
             Uang yang kamu ambil lebih besar {{ rp(report.leak_amount) }} dari untung. Inilah yang menguras kas usaha.
           </div>
+          <button v-if="report" class="btn" @click="shareReport">Bagikan ringkasan (WhatsApp)</button>
+        </div>
+        <div v-if="mode === 'device' && catReport" class="card">
+          <h2>Pengeluaran per kategori</h2>
+          <p v-if="!catReport.items.length" class="muted">Belum ada pengeluaran usaha di bulan ini.</p>
+          <div v-for="c in catReport.items" :key="c.name" class="catrow">
+            <div class="row-between"><span>{{ c.name }}</span><span>{{ rp(c.amount) }} <span class="muted small">({{ c.pct }}%)</span></span></div>
+            <div class="catbar" aria-hidden="true"><div class="bar bad" :style="{ width: c.pct + '%' }"></div></div>
+          </div>
         </div>
       </template>
+
+      <!-- LAINNYA: pengaturan, keamanan, cadangan -->
+      <template v-else-if="tab === 'more'">
+        <template v-if="mode === 'device'">
+          <section class="card">
+            <h2>Di mana datamu?</h2>
+            <p class="small">Seluruh catatan keuangan disimpan <strong>terenkripsi (AES-256) di HP ini</strong>. Server kami tidak punya akun, database, atau salinan datamu. Satu-satunya yang dikirim keluar adalah <strong>foto nota</strong> saat kamu memakai Scan: foto diteruskan lewat server kami ke layanan OCR (Gemini di Vertex AI pada versi produksi) untuk dibaca, dan <strong>tidak disimpan di server kami</strong>. Perlakuan data oleh penyedia OCR mengikuti ketentuan layanannya.</p>
+            <p class="small muted">Konsekuensinya: bila HP hilang, rusak, atau datanya terhapus dan kamu tidak punya cadangan, data tidak bisa dipulihkan. Buat cadangan secara rutin.</p>
+          </section>
+
+          <section class="card">
+            <h2>Cadangan</h2>
+            <p class="small muted">Terakhir: {{ fmtDateTime(backupInfo.last) }}. Perubahan sejak itu: {{ backupInfo.changes }}.</p>
+            <label class="check"><input type="checkbox" v-model="backupOpts.images"> Sertakan foto nota (file lebih besar)</label>
+            <button class="btn primary" :disabled="busy" @click="doBackup(false)">Unduh cadangan terenkripsi</button>
+            <button v-if="canShareFiles" class="btn" :disabled="busy" @click="doBackup(true)">Bagikan cadangan (WhatsApp, Drive, dll.)</button>
+            <button class="btn" @click="openRestore">Pulihkan dari file cadangan</button>
+            <p class="small muted">File cadangan terenkripsi: aman disimpan di Drive atau dikirim ke diri sendiri. Dibuka dengan PIN atau kode pemulihan.</p>
+          </section>
+
+          <section class="card">
+            <h2>Keamanan</h2>
+            <form @submit.prevent="changePin">
+              <label>PIN lama<input v-model="pinForm.old" type="password" autocomplete="current-password" maxlength="64" required></label>
+              <label>PIN baru<input v-model="pinForm.next" type="password" autocomplete="new-password" maxlength="64" required></label>
+              <p v-if="pinForm.next" class="meter" :class="'m' + newPinStrength.score">{{ newPinStrength.label }}</p>
+              <label>Ulangi PIN baru<input v-model="pinForm.next2" type="password" autocomplete="new-password" maxlength="64" required></label>
+              <button class="btn" :disabled="busy">Ganti PIN</button>
+            </form>
+            <label>Kunci otomatis setelah tidak aktif
+              <select :value="settings.idleMinutes ?? 5" @change="setIdle($event.target.value)">
+                <option value="1">1 menit</option>
+                <option value="5">5 menit</option>
+                <option value="15">15 menit</option>
+                <option value="0">Jangan kunci otomatis</option>
+              </select>
+            </label>
+            <details class="filters">
+              <summary>Buat kode pemulihan baru</summary>
+              <p class="small muted">Kode lama otomatis tidak berlaku lagi.</p>
+              <form @submit.prevent="makeRecovery">
+                <label>PIN<input v-model="setForm.recoveryPin" type="password" autocomplete="current-password" maxlength="64" required></label>
+                <button class="btn" :disabled="busy">Buat kode baru</button>
+              </form>
+              <div v-if="setForm.newRecovery">
+                <div class="codebox">{{ setForm.newRecovery }}</div>
+                <div class="two">
+                  <button class="btn" type="button" @click="copyRecovery(setForm.newRecovery)">Salin</button>
+                  <button class="btn" type="button" @click="downloadRecovery(setForm.newRecovery)">Unduh .txt</button>
+                </div>
+              </div>
+            </details>
+          </section>
+
+          <section class="card">
+            <h2>Penyimpanan di HP</h2>
+            <p class="small">Penyimpanan permanen: <strong>{{ storageInfo.persisted === null ? 'tidak diketahui' : storageInfo.persisted ? 'aktif' : 'belum aktif' }}</strong>
+              <span v-if="storageInfo.usage != null"> · terpakai {{ fmtBytes(storageInfo.usage) }}</span></p>
+            <p v-if="storageInfo.persisted === false" class="alert warn small">Tanpa izin ini, browser bisa menghapus data bila ruang HP penuh. Di iPhone, data situs yang tidak dibuka 7 hari bisa dihapus kecuali aplikasi dipasang ke layar utama.</p>
+            <button v-if="storageInfo.persisted === false" class="btn" :disabled="busy" @click="askPersist">Minta penyimpanan permanen</button>
+            <button v-if="installEvt" class="btn primary" @click="installApp">Pasang aplikasi ke layar utama</button>
+            <p v-else class="small muted">Tip: pasang ke layar utama lewat menu browser ("Tambahkan ke layar utama") agar data lebih awet dan aplikasi terbuka seperti app biasa.</p>
+          </section>
+
+          <section class="card">
+            <h2>Profil &amp; ekspor</h2>
+            <form @submit.prevent="saveName">
+              <label>Nama panggilan<input v-model.trim="setForm.name" maxlength="40"></label>
+              <button class="btn" :disabled="busy">Simpan nama</button>
+            </form>
+            <label>Bulan untuk ekspor<input type="month" v-model="setForm.csvMonth"></label>
+            <div class="two">
+              <button class="btn" @click="exportCsv(false)">CSV bulan ini</button>
+              <button class="btn" @click="exportCsv(true)">CSV semua</button>
+            </div>
+            <form v-if="ocrInfo.access_code_required" @submit.prevent="saveOcrCode">
+              <label>Kode akses OCR (diberikan pengelola layanan)<input v-model.trim="setForm.ocrCode" maxlength="100" autocomplete="off"></label>
+              <button class="btn" :disabled="busy">Simpan kode</button>
+            </form>
+          </section>
+
+          <section class="card">
+            <h2>Zona bahaya</h2>
+            <p class="small muted">Menghapus SEMUA data di HP ini secara permanen. Tidak bisa diurungkan (kecuali kamu punya cadangan).</p>
+            <label>Ketik HAPUS untuk konfirmasi<input v-model="setForm.wipeText" autocomplete="off"></label>
+            <button class="btn danger" :disabled="busy || setForm.wipeText !== 'HAPUS'" @click="wipeAll">Hapus semua data</button>
+          </section>
+        </template>
+        <section v-else class="card">
+          <h2>Akun</h2>
+          <p class="small">Masuk sebagai {{ me && me.name }}. Datamu tersimpan terenkripsi di server (mode server).</p>
+          <button class="btn danger" @click="logout">Keluar</button>
+        </section>
+      </template>
+
+      <!-- DETAIL / EDIT TRANSAKSI -->
+      <div v-if="sheet" class="sheet-backdrop" @click.self="closeSheet">
+        <div class="sheet" role="dialog" aria-modal="true" aria-label="Detail transaksi">
+          <div class="sheet-handle"></div>
+          <div class="big" :class="sheet.direction === 'in' ? 'pos' : 'neg'">{{ sheet.direction === 'in' ? '+' : '-' }}{{ rp(sheet.amount) }}</div>
+          <dl v-if="!editing" class="rows">
+            <dt>Jenis</dt><dd>{{ kindLabel(sheet) }}</dd>
+            <dt>Dompet</dt><dd>{{ sheet.wallet === 'business' ? 'Usaha' : 'Pribadi' }}</dd>
+            <dt>Kategori</dt><dd>{{ sheet.category_name || '-' }}</dd>
+            <dt>Waktu</dt><dd>{{ fmtDate(sheet.occurred_at) }}, {{ fmtTime(sheet.occurred_at) }}</dd>
+            <dt>Catatan</dt><dd>{{ sheet.note || '-' }}</dd>
+            <dt>Sumber</dt><dd>{{ sheet.source === 'ocr' ? 'Scan nota' : 'Dicatat manual' }}</dd>
+          </dl>
+          <div v-if="!editing" class="sheet-actions">
+            <button class="btn" @click="startEdit">Ubah</button>
+            <button class="btn danger" @click="deleteFromSheet">Hapus</button>
+            <button class="link" @click="closeSheet">Tutup</button>
+          </div>
+          <form v-else @submit.prevent="saveEdit">
+            <p class="muted small">Nominal tidak bisa diubah agar riwayat tetap tepercaya. Untuk koreksi nominal, hapus lalu catat ulang.</p>
+            <label>Catatan
+              <input v-model.trim="editForm.note" maxlength="280">
+            </label>
+            <label v-if="sheet.kind !== 'transfer'">Kategori
+              <select v-model="editForm.category_id">
+                <option value="">(tanpa kategori)</option>
+                <option v-for="c in editCategories" :key="c.id" :value="c.id">{{ c.name }}</option>
+              </select>
+            </label>
+            <label>Waktu
+              <input type="datetime-local" v-model="editForm.when" required>
+            </label>
+            <button class="btn primary" :disabled="busy">Simpan perubahan</button>
+            <button class="link" type="button" @click="editing = false">Batal</button>
+          </form>
+        </div>
+      </div>
 
       <nav class="tabs" aria-label="Menu utama">
         <button :class="{ on: tab === 'home' }" @click="go('home')">Beranda</button>
         <button :class="{ on: tab === 'add' }" @click="go('add')">Catat</button>
         <button :class="{ on: tab === 'scan' }" @click="go('scan')">Scan</button>
         <button :class="{ on: tab === 'report' }" @click="go('report')">Laporan</button>
+        <button :class="{ on: tab === 'more' }" @click="go('more')">Lainnya</button>
       </nav>
     </template>
 
-    <p v-else class="muted center">Memuat...</p>
   </main>
 </div>
 <script src="/assets/vue.global.prod.js"></script>
+<script src="/assets/local-crypto.js"></script>
+<script src="/assets/local-db.js"></script>
+<script src="/assets/local-ledger.js"></script>
+<script src="/assets/local-backup.js"></script>
 <script src="/assets/app.js"></script>
 </body>
 </html>

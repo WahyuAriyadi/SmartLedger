@@ -28,9 +28,11 @@ func (h *Handler) Routes(mux *http.ServeMux, protect httpx.Middleware) {
 	route("GET /v1/businesses/{bid}/categories", h.categories)
 	route("POST /v1/businesses/{bid}/transactions", h.addTransaction)
 	route("GET /v1/businesses/{bid}/transactions", h.listTransactions)
+	route("PUT /v1/businesses/{bid}/transactions/{id}", h.updateTransaction)
 	route("DELETE /v1/businesses/{bid}/transactions/{id}", h.deleteTransaction)
 	route("POST /v1/businesses/{bid}/transfers", h.transfer)
 	route("GET /v1/businesses/{bid}/reports/monthly", h.monthly)
+	route("GET /v1/businesses/{bid}/reports/daily", h.daily)
 }
 
 func (h *Handler) createBusiness(w http.ResponseWriter, r *http.Request, uid string) error {
@@ -92,7 +94,8 @@ func (h *Handler) listTransactions(w http.ResponseWriter, r *http.Request, uid s
 	q := r.URL.Query()
 	limit, _ := strconv.Atoi(q.Get("limit"))
 	items, next, err := h.svc.List(r.Context(), uid, r.PathValue("bid"),
-		ListParams{Wallet: q.Get("wallet"), Limit: limit, Cursor: q.Get("cursor")})
+		ListParams{Wallet: q.Get("wallet"), Kind: q.Get("kind"), CategoryID: q.Get("category_id"),
+			From: q.Get("from"), To: q.Get("to"), Limit: limit, Cursor: q.Get("cursor")})
 	if err != nil {
 		return err
 	}
@@ -129,4 +132,28 @@ func (h *Handler) monthly(w http.ResponseWriter, r *http.Request, uid string) er
 		return err
 	}
 	return httpx.WriteJSON(w, http.StatusOK, m)
+}
+
+func (h *Handler) updateTransaction(w http.ResponseWriter, r *http.Request, uid string) error {
+	var in UpdateTransaction
+	if err := httpx.DecodeJSON(w, r, &in); err != nil {
+		return err
+	}
+	t, err := h.svc.Update(r.Context(), uid, r.PathValue("bid"), r.PathValue("id"), in)
+	if err != nil {
+		return err
+	}
+	return httpx.WriteJSON(w, http.StatusOK, t)
+}
+
+func (h *Handler) daily(w http.ResponseWriter, r *http.Request, uid string) error {
+	days, _ := strconv.Atoi(r.URL.Query().Get("days"))
+	if days == 0 {
+		days = 7
+	}
+	v, err := h.svc.Daily(r.Context(), uid, r.PathValue("bid"), days)
+	if err != nil {
+		return err
+	}
+	return httpx.WriteJSON(w, http.StatusOK, map[string]any{"days": v})
 }
