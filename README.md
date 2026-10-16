@@ -250,14 +250,19 @@ scripts/             init-env.ps1, cloudcheck
 
 ---
 
-## Roadmap
+## Showcase
 
-- [ ] Optional end-to-end-encrypted sync/backup to the cloud (server can't read it)
-- [ ] Argon2 (WASM) for a memory-hard KDF
-- [ ] WebAuthn/biometric quick unlock
-- [ ] Recurring transactions, budgets, debt and receivable tracking
-- [ ] Scheduled "cash running low" alerts computed on-device
-- [ ] Terraform for GCP (Cloud Run + Vertex AI)
+![1792142602232](image/README/1792142602232.png)
+
+![1792142713496](image/README/1792142713496.png)
+
+![1792142728610](image/README/1792142728610.png)
+
+![1792142742312](image/README/1792142742312.png)
+
+![1792142768355](image/README/1792142768355.png)
+
+![1792142791586](image/README/1792142791586.png)
 
 ---
 
