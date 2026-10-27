@@ -155,22 +155,6 @@ Server mode keeps its earlier defences: field-level AES-256-GCM, argon2id, hashe
 
 ---
 
-## Local-first, cloud-ready
-
-Everything runs on a laptop: the app, the on-device storage, and a **mock OCR engine** that picks a sample receipt from the image hash. The upload → review → correct → confirm flow is real; only "reading the pixels" is faked, and the UI says so.
-
-The cloud version is **not a separate branch or a pile of commented-out code**. It's the same binary, switched by environment variables:
-
-|             | Local (default)                   | Cloud                                                                                                                                      |
-| ----------- | --------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
-| Receipt OCR | `OCR_BACKEND=mock` (free, fake) | `OCR_BACKEND=gemini` + `GEMINI_API_KEY` (Gemini API, has a free tier) or `OCR_BACKEND=vertex` + `VERTEX_PROJECT` (Vertex AI, paid) |
-| Port        | `ADDR` (`:8080`)              | `PORT`, set by Cloud Run (picked up automatically)                                                                                       |
-| Client IP   | `TRUSTED_PROXY_HOPS=0`          | `TRUSTED_PROXY_HOPS=1` (one proxy in front)                                                                                              |
-| Logs        | plain slog JSON                   | Cloud Logging fields (`severity`/`message`), auto-enabled when `K_SERVICE` exists                                                    |
-
-Because the server holds no data, the cloud footprint stays tiny: **Cloud Run for hosting, plus a Gemini model for reading receipts**. No Cloud SQL, no Cloud Storage, no Secret Manager. That's on purpose: small shops shouldn't pay for infrastructure they don't need.
-
----
 
 ## Quick start
 
