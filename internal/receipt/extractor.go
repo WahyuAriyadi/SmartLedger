@@ -13,8 +13,8 @@ import (
 	"smartledger/internal/ledger"
 )
 
-// Extractor mengubah foto nota menjadi data terstruktur. Implementasi lokal: MockExtractor.
-// Implementasi cloud (Gemini di Vertex AI): extractor_vertex.go (baris ter-comment).
+// Extractor turns a receipt photo into structured data. Local implementation: MockExtractor.
+// Cloud implementations: GeminiExtractor (API key) and VertexExtractor (service account).
 type Extractor interface {
 	Name() string
 	Extract(ctx context.Context, img []byte, mime string) (Extraction, error)
@@ -22,17 +22,17 @@ type Extractor interface {
 
 type Extraction struct {
 	Merchant   string
-	Date       string // YYYY-MM-DD, boleh kosong
+	Date       string // YYYY-MM-DD, may be empty
 	Items      []ExtractedItem
 	Confidence float64
-	Raw        string // respons mentah mesin OCR (disimpan terenkripsi untuk evaluasi akurasi)
+	Raw        string // raw OCR engine response (stored encrypted for accuracy evaluation)
 }
 
 type ExtractedItem struct {
 	Name         string
 	Qty          float64
 	UnitPrice    int64
-	CategoryHint string // nama kategori bawaan, mis. "Bahan baku"
+	CategoryHint string // built-in category name, e.g. "Bahan baku"
 }
 
 const (
@@ -56,9 +56,9 @@ func cleanText(s string, limit int) string {
 	return out
 }
 
-// Normalize memperlakukan keluaran mesin OCR sebagai INPUT TIDAK TERPERCAYA. Teks pada foto
-// bisa berisi instruksi (prompt injection) atau angka ngawur; di sini semuanya dibatasi,
-// dibersihkan, dan divalidasi sebelum menyentuh database.
+// Normalize treats OCR output as UNTRUSTED INPUT. Text in the photo may carry instructions
+// (prompt injection) or garbage numbers; everything is bounded, sanitized, and validated
+// before it reaches the database.
 func (e *Extraction) Normalize() error {
 	if len(e.Items) == 0 {
 		return fmt.Errorf("tidak ada item terbaca")
@@ -73,7 +73,7 @@ func (e *Extraction) Normalize() error {
 		it.CategoryHint = cleanText(it.CategoryHint, 40)
 		if it.Name == "" || math.IsNaN(it.Qty) || it.Qty <= 0 || it.Qty > maxQty ||
 			it.UnitPrice < 0 || it.UnitPrice > ledger.MaxAmount {
-			continue // item cacat dibuang, bukan ditebak
+			continue // malformed items are dropped, not guessed
 		}
 		it.Qty = math.Round(it.Qty*1000) / 1000
 		kept = append(kept, it)
@@ -104,11 +104,11 @@ func (e *Extraction) Total() int64 {
 	return t
 }
 
-// ---------- mesin OCR tiruan untuk pengembangan lokal ----------
+// ---------- mock OCR engine for local development ----------
 
-// MockExtractor TIDAK membaca gambar. Ia memilih salah satu nota contoh secara deterministik
-// dari hash gambar, sehingga seluruh alur (unggah, review, koreksi, konfirmasi) bisa diuji
-// penuh tanpa layanan cloud dan tanpa biaya.
+// MockExtractor does NOT read the image. It deterministically picks one of the sample receipts
+// from the image hash, so the whole flow (upload, review, correct, confirm) can be exercised
+// without cloud services or cost.
 type MockExtractor struct{}
 
 func (MockExtractor) Name() string { return "mock" }

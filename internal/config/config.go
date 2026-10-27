@@ -1,5 +1,5 @@
-// Package config membaca konfigurasi dari environment dan menolak start bila
-// ada yang salah (fail fast), terutama rahasia.
+// Package config reads configuration from the environment and fails fast on invalid values,
+// secrets in particular.
 package config
 
 import (
@@ -14,25 +14,25 @@ import (
 )
 
 type Config struct {
-	// StorageMode menentukan di mana data pengguna disimpan:
-	//   device (default): data keuangan hanya ada di perangkat pengguna (terenkripsi); server tanpa database,
-	//                     hanya menyajikan aplikasi dan menjadi gerbang OCR tanpa menyimpan apa pun.
-	//   server: mode lama dengan akun dan PostgreSQL.
+	// StorageMode selects where user data lives:
+	//   device (default): financial data stays on the user's device (encrypted); the server has no database,
+	//                     it only serves the app and acts as an OCR gateway without persisting anything.
+	//   server: legacy mode with accounts and PostgreSQL.
 	StorageMode string
 
-	// Gerbang OCR (mode device).
-	OCRAccessCode string // kosong = tidak diwajibkan
-	OCRDailyCap   int    // batas total panggilan OCR per hari (pengaman biaya)
+	// OCR gateway (device mode).
+	OCRAccessCode string // empty = not required
+	OCRDailyCap   int    // total OCR calls per day (cost guard)
 
 	Addr             string
-	DatabaseURL      string // role ledger_app (terkena RLS)
+	DatabaseURL      string // ledger_app role (subject to RLS)
 	DataKeys         map[string][]byte
 	ActiveKeyID      string
 	PhonePepper      []byte
 	SessionTTL       time.Duration
 	MaxFailedLogins  int
 	LockDuration     time.Duration
-	TrustedProxyHops int // 0 = pakai RemoteAddr; 1 = percaya 1 proxy di depan (Cloud Run/LB)
+	TrustedProxyHops int // 0 = use RemoteAddr; 1 = trust one proxy in front (Cloud Run / LB)
 	RequestTimeout   time.Duration
 	DrainDelay       time.Duration
 	DBMaxOpen        int
@@ -41,20 +41,34 @@ type Config struct {
 	RateLimitRPS     float64
 	RateLimitBurst   int
 
-	// Backend yang bisa ditukar tanpa mengubah kode lain (dipilih lewat env).
-	StorageBackend  string // local (default) | gcs (butuh baris CLOUD diaktifkan)
+	// Swappable backends, selected via environment.
+	StorageBackend  string // local (only option; server-mode receipt photos are stored on disk)
 	StorageLocalDir string
-	OCRBackend      string // mock (default) | vertex (butuh baris CLOUD diaktifkan)
+	OCRBackend      string // mock (default, free) | gemini (Gemini API, free tier available) | vertex (Vertex AI, paid)
 
-	// CLOUD: GCSBucket      string
-	// CLOUD: VertexProject  string
-	// CLOUD: VertexLocation string
-	// CLOUD: VertexModel    string
+	// Used only when OCRBackend=gemini. Keys come from Google AI Studio.
+	GeminiAPIKey string
+	GeminiModel  string
+
+	// Used only when OCRBackend=vertex.
+	VertexProject  string
+	VertexLocation string // "global" or a region, e.g. asia-southeast1
+	VertexModel    string
+	// VertexAccessToken is for local runs against the real Vertex AI (`gcloud auth print-access-token`).
+	// Leave empty on Cloud Run, where the service account is used automatically.
+	VertexAccessToken string
 }
+
+// DefaultVertexModel is the Vertex AI model ID. Gemini models are retired periodically;
+// gemini-2.5-flash was scheduled to retire on 20 Oct 2026.
+const DefaultVertexModel = "gemini-3.5-flash-lite"
+
+// DefaultGeminiModel is the Gemini API model ID (same model as the Vertex default).
+const DefaultGeminiModel = "gemini-3.5-flash-lite"
 
 var keyIDRe = regexp.MustCompile(`^[a-z0-9]{1,8}$`)
 
-// MigrateURL mengembalikan DSN pemilik skema (hanya dipakai perintah `migrate`).
+// MigrateURL returns the schema-owner DSN (used only by the `migrate` command).
 func MigrateURL(getenv func(string) string) (string, error) {
 	u := getenv("MIGRATE_DATABASE_URL")
 	if u == "" {
@@ -89,23 +103,35 @@ func Load(getenv func(string) string) (Config, error) {
 		StorageLocalDir:  str(getenv, "STORAGE_LOCAL_DIR", "./data/receipts"),
 		OCRBackend:       str(getenv, "OCR_BACKEND", "mock"),
 	}
-	// CLOUD: // Cloud Run memberi tahu port lewat variabel PORT.
-	// CLOUD: if p := getenv("PORT"); p != "" {
-	// CLOUD: 	c.Addr = ":" + p
-	// CLOUD: }
-	// CLOUD: c.GCSBucket = getenv("GCS_BUCKET")
-	// CLOUD: c.VertexProject = getenv("VERTEX_PROJECT")
-	// CLOUD: c.VertexLocation = str(getenv, "VERTEX_LOCATION", "asia-southeast2")
-	// CLOUD: c.VertexModel = str(getenv, "VERTEX_MODEL", "gemini-2.5-flash") // cek ID model terbaru sebelum deploy
-	// CLOUD: if c.StorageBackend == "gcs" && c.GCSBucket == "" {
-	// CLOUD: 	fail("GCS_BUCKET wajib diisi bila STORAGE_BACKEND=gcs")
-	// CLOUD: }
-	// CLOUD: if c.OCRBackend == "vertex" && c.VertexProject == "" {
-	// CLOUD: 	fail("VERTEX_PROJECT wajib diisi bila OCR_BACKEND=vertex")
-	// CLOUD: }
+	// Cloud Run provides the port via PORT; elsewhere it is empty and ADDR applies.
+	if p := getenv("PORT"); p != "" {
+		c.Addr = ":" + p
+	}
+	c.GeminiAPIKey = getenv("GEMINI_API_KEY")
+	c.GeminiModel = str(getenv, "GEMINI_MODEL", DefaultGeminiModel)
+	c.VertexProject = getenv("VERTEX_PROJECT")
+	c.VertexLocation = str(getenv, "VERTEX_LOCATION", "global")
+	c.VertexModel = str(getenv, "VERTEX_MODEL", DefaultVertexModel)
+	c.VertexAccessToken = getenv("VERTEX_ACCESS_TOKEN")
+	switch c.OCRBackend {
+	case "mock":
+	case "gemini":
+		if c.GeminiAPIKey == "" {
+			fail("GEMINI_API_KEY wajib diisi bila OCR_BACKEND=gemini (buat gratis di aistudio.google.com)")
+		}
+	case "vertex":
+		if c.VertexProject == "" {
+			fail("VERTEX_PROJECT wajib diisi bila OCR_BACKEND=vertex")
+		}
+	default:
+		fail("OCR_BACKEND %q tidak dikenal (mock | gemini | vertex)", c.OCRBackend)
+	}
+	if c.StorageBackend != "local" {
+		fail("STORAGE_BACKEND %q tidak dikenal (local)", c.StorageBackend)
+	}
 	switch c.StorageMode {
 	case "device":
-		// Tanpa database: tidak ada rahasia server yang melindungi data pengguna, karena memang tidak ada datanya.
+		// No database: there is no server-side secret protecting user data because the server holds none.
 	case "server":
 		if c.DatabaseURL == "" {
 			fail("DATABASE_URL wajib diisi pada STORAGE_MODE=server")
@@ -132,7 +158,7 @@ func Load(getenv func(string) string) (Config, error) {
 	return c, errors.Join(errs...)
 }
 
-// parseKeys membaca "id:base64,id:base64"; tiap kunci wajib 32 byte.
+// parseKeys reads "id:base64,id:base64"; each key must be 32 bytes.
 func parseKeys(raw string) (map[string][]byte, error) {
 	keys := map[string][]byte{}
 	for _, item := range strings.Split(raw, ",") {
@@ -189,5 +215,5 @@ func dur(g func(string) string, k string, def time.Duration, fail func(string, .
 	return d
 }
 
-// FromOS adalah getenv bawaan.
+// FromOS is the default getenv.
 var FromOS = os.Getenv

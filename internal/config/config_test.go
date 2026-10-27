@@ -70,3 +70,56 @@ func TestDeviceModeIsDefaultAndNeedsNoServerSecrets(t *testing.T) {
 		t.Fatal("OCR_DAILY_CAP bukan angka harus ditolak")
 	}
 }
+
+func TestCloudRunPortOverridesAddr(t *testing.T) {
+	c, err := Load(env(map[string]string{"PORT": "9090"}))
+	if err != nil || c.Addr != ":9090" {
+		t.Fatalf("PORT harus dipakai: %v %q", err, c.Addr)
+	}
+	c, err = Load(env(map[string]string{"ADDR": ":7000"}))
+	if err != nil || c.Addr != ":7000" {
+		t.Fatalf("ADDR dipakai bila PORT kosong: %v %q", err, c.Addr)
+	}
+}
+
+func TestVertexBackendConfig(t *testing.T) {
+	if _, err := Load(env(map[string]string{"OCR_BACKEND": "vertex"})); err == nil ||
+		!strings.Contains(err.Error(), "VERTEX_PROJECT") {
+		t.Fatalf("vertex tanpa project harus ditolak saat start: %v", err)
+	}
+	c, err := Load(env(map[string]string{"OCR_BACKEND": "vertex", "VERTEX_PROJECT": "p"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.VertexLocation != "global" || c.VertexModel != DefaultVertexModel || c.VertexAccessToken != "" {
+		t.Fatalf("default vertex salah: %+v", c)
+	}
+	if _, err := Load(env(map[string]string{"OCR_BACKEND": "tesseract"})); err == nil {
+		t.Fatal("OCR_BACKEND tidak dikenal harus ditolak saat start, bukan saat request pertama")
+	}
+	if _, err := Load(env(map[string]string{"STORAGE_BACKEND": "gcs"})); err == nil {
+		t.Fatal("STORAGE_BACKEND tidak dikenal harus ditolak")
+	}
+}
+
+func TestMockIsStillTheDefaultSoLocalNeedsNoCloud(t *testing.T) {
+	c, err := Load(env(map[string]string{}))
+	if err != nil || c.OCRBackend != "mock" {
+		t.Fatalf("default lokal harus mock tanpa kredensial cloud: %v %q", err, c.OCRBackend)
+	}
+}
+
+func TestGeminiBackendConfig(t *testing.T) {
+	if _, err := Load(env(map[string]string{"OCR_BACKEND": "gemini"})); err == nil ||
+		!strings.Contains(err.Error(), "GEMINI_API_KEY") {
+		t.Fatalf("gemini tanpa API key harus ditolak saat start: %v", err)
+	}
+	c, err := Load(env(map[string]string{"OCR_BACKEND": "gemini", "GEMINI_API_KEY": "k"}))
+	if err != nil || c.GeminiModel != DefaultGeminiModel || c.GeminiAPIKey != "k" {
+		t.Fatalf("default gemini salah: %v %+v", err, c)
+	}
+	c, _ = Load(env(map[string]string{"OCR_BACKEND": "gemini", "GEMINI_API_KEY": "k", "GEMINI_MODEL": "m-lain"}))
+	if c.GeminiModel != "m-lain" {
+		t.Fatalf("GEMINI_MODEL harus bisa diganti: %q", c.GeminiModel)
+	}
+}

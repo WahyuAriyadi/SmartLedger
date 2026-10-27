@@ -1,13 +1,13 @@
-# Mode PERANGKAT (default): data keuangan tersimpan terenkripsi di HP/browser pengguna. Server hanya menyajikan
-# aplikasi dan menjadi gerbang OCR tanpa penyimpanan. TIDAK ada database, TIDAK ada volume data.
+# Device mode (default): financial data is stored encrypted on the user's phone/browser. The server only serves
+# the app and acts as an OCR gateway without storage. No database, no data volume.
 #   docker compose up --build -d      ->  http://localhost:8080
 #
-# Mode server lama (akun + PostgreSQL): tambahkan docker-compose.server.yml
+# Legacy server mode (accounts + PostgreSQL): add docker-compose.server.yml
 #   docker compose -f docker-compose.yml -f docker-compose.server.yml up --build -d
 #
-# CATATAN: fitur penyimpanan aman di browser (WebCrypto) hanya jalan di HTTPS atau http://localhost.
-# Membuka lewat IP jaringan (http://192.168.x.x:8080) dari HP akan DITOLAK browser. Untuk uji di HP gunakan
-# terowongan HTTPS (mis. cloudflared/ngrok) atau `adb reverse tcp:8080 tcp:8080` lalu buka http://localhost:8080 di HP.
+# Note: browser secure storage (WebCrypto) only works over HTTPS or http://localhost.
+# Opening the app via a network IP (http://192.168.x.x:8080) from a phone is rejected by the browser. To test on a phone, use
+# an HTTPS tunnel (e.g. cloudflared/ngrok) or `adb reverse tcp:8080 tcp:8080` and open http://localhost:8080 on the phone.
 name: smartledger
 
 services:
@@ -15,17 +15,24 @@ services:
     build: .
     image: smartledger:local
     ports:
-      - "127.0.0.1:8080:8080" # hanya bisa diakses dari komputer ini
+      - "127.0.0.1:8080:8080" # reachable from this machine only
     environment:
       ADDR: ":8080"
       STORAGE_MODE: device
-      OCR_BACKEND: mock # OCR tiruan lokal; produksi: vertex (lihat README, bagian migrasi ke cloud)
-      OCR_ACCESS_CODE: ${OCR_ACCESS_CODE:-} # opsional: kode yang harus dikirim klien untuk memakai OCR
-      OCR_DAILY_CAP: ${OCR_DAILY_CAP:-300} # pengaman biaya: total panggilan OCR per hari
-      # --- Padanan untuk Cloud Run (diisi lewat Terraform, bukan compose); lihat README bagian "Migrasi ke cloud" ---
-      # CLOUD: TRUSTED_PROXY_HOPS: "1"
-      # CLOUD: OCR_BACKEND: vertex         (+ VERTEX_PROJECT, VERTEX_LOCATION, VERTEX_MODEL)
-      # CLOUD: OCR_ACCESS_CODE: <dari Secret Manager>
+      # OCR defaults to mock (free, fake). To try a real OCR engine from a laptop, set these in .env or the shell:
+      #   Gemini API (free tier): OCR_BACKEND=gemini  GEMINI_API_KEY=<key from aistudio.google.com>
+      #   Vertex AI (paid):       OCR_BACKEND=vertex  VERTEX_PROJECT=<project id>  VERTEX_ACCESS_TOKEN=$(gcloud auth print-access-token)
+      # On Cloud Run these are set at deploy time (see README, "Cloud architecture"), not through compose.
+      OCR_BACKEND: ${OCR_BACKEND:-mock}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GEMINI_MODEL: ${GEMINI_MODEL:-}
+      VERTEX_PROJECT: ${VERTEX_PROJECT:-}
+      VERTEX_LOCATION: ${VERTEX_LOCATION:-global}
+      VERTEX_MODEL: ${VERTEX_MODEL:-}
+      VERTEX_ACCESS_TOKEN: ${VERTEX_ACCESS_TOKEN:-} # local testing only; valid for about 1 hour
+      OCR_ACCESS_CODE: ${OCR_ACCESS_CODE:-} # optional: code clients must send to use OCR
+      OCR_DAILY_CAP: ${OCR_DAILY_CAP:-300} # cost guard: total OCR calls per day
+      TRUSTED_PROXY_HOPS: ${TRUSTED_PROXY_HOPS:-0} # 0 locally; 1 behind Cloud Run
     healthcheck:
       test: ["CMD", "/ledger", "healthcheck"]
       interval: 10s
@@ -33,7 +40,7 @@ services:
       retries: 3
       start_period: 5s
     restart: unless-stopped
-    # Hardening container: filesystem read-only, tanpa capability. Tidak ada yang ditulis ke disk.
+    # Container hardening: read-only filesystem, no capabilities. Nothing is written to disk.
     read_only: true
     tmpfs:
       - /tmp

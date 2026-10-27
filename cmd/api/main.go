@@ -1,9 +1,9 @@
-// Perintah:
+// Command ledger is the API server. Usage:
 //
-//	ledger serve    jalankan API (default)
-//	ledger migrate  terapkan migrasi database (pakai MIGRATE_DATABASE_URL, pemilik skema)
-//	ledger genkey   cetak 32 byte acak base64 untuk DATA_KEYS / PHONE_PEPPER
-//	ledger healthcheck  keluar 0 bila /readyz sehat (untuk Docker; image distroless tanpa curl)
+//	ledger serve        run the API (default)
+//	ledger migrate      apply database migrations (uses MIGRATE_DATABASE_URL, the schema owner)
+//	ledger genkey       print 32 random bytes, base64-encoded, for DATA_KEYS / PHONE_PEPPER
+//	ledger healthcheck  exit 0 when /readyz is healthy (for Docker; the distroless image has no curl)
 package main
 
 import (
@@ -19,7 +19,7 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
-	_ "time/tzdata" // zona waktu tertanam: image distroless tidak punya /usr/share/zoneinfo
+	_ "time/tzdata" // embedded tz database: the distroless image has no /usr/share/zoneinfo
 
 	"smartledger/internal/app"
 	"smartledger/internal/config"
@@ -28,19 +28,7 @@ import (
 )
 
 func main() {
-	log := slog.New(slog.NewJSONHandler(os.Stdout, nil))
-	// CLOUD: // Cloud Logging membaca field "severity", bukan "level" bawaan slog.
-	// CLOUD: log = slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
-	// CLOUD: 	ReplaceAttr: func(_ []string, a slog.Attr) slog.Attr {
-	// CLOUD: 		switch a.Key {
-	// CLOUD: 		case slog.LevelKey:
-	// CLOUD: 			a.Key = "severity"
-	// CLOUD: 		case slog.MessageKey:
-	// CLOUD: 			a.Key = "message"
-	// CLOUD: 		}
-	// CLOUD: 		return a
-	// CLOUD: 	},
-	// CLOUD: }))
+	log := newLogger(os.Getenv)
 	slog.SetDefault(log)
 
 	cmd := "serve"
@@ -66,6 +54,26 @@ func main() {
 	}
 }
 
+// newLogger picks the log format. On Cloud Run (K_SERVICE is set) or with LOG_FORMAT=cloud,
+// "level" becomes "severity" and "msg" becomes "message", the fields Cloud Logging reads.
+// Elsewhere (laptop, Docker Compose) slog's default JSON format is used.
+func newLogger(getenv func(string) string) *slog.Logger {
+	if getenv("LOG_FORMAT") != "cloud" && getenv("K_SERVICE") == "" {
+		return slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	}
+	return slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
+		ReplaceAttr: func(_ []string, a slog.Attr) slog.Attr {
+			switch a.Key {
+			case slog.LevelKey:
+				a.Key = "severity"
+			case slog.MessageKey:
+				a.Key = "message"
+			}
+			return a
+		},
+	}))
+}
+
 func serve(log *slog.Logger) error {
 	cfg, err := config.Load(config.FromOS)
 	if err != nil {
@@ -74,7 +82,7 @@ func serve(log *slog.Logger) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	// Mode device: tidak ada database (data ada di perangkat pengguna). Mode server: PostgreSQL.
+	// Device mode: no database (data lives on the user's device). Server mode: PostgreSQL.
 	var database *db.DB
 	if cfg.StorageMode == "server" {
 		database, err = db.Open(ctx, cfg.DatabaseURL, db.Options{MaxOpen: cfg.DBMaxOpen, MaxIdle: cfg.DBMaxIdle})
@@ -94,9 +102,9 @@ func serve(log *slog.Logger) error {
 	srv := &http.Server{
 		Addr:              cfg.Addr,
 		Handler:           handler,
-		ReadHeaderTimeout: 5 * time.Second, // anti Slowloris
+		ReadHeaderTimeout: 5 * time.Second, // Slowloris protection
 		ReadTimeout:       10 * time.Second,
-		WriteTimeout:      15 * time.Second,
+		WriteTimeout:      35 * time.Second, // must exceed the OCR timeout (25 s): real model calls can be slower than the mock
 		IdleTimeout:       60 * time.Second,
 		MaxHeaderBytes:    16 << 10,
 	}
@@ -112,8 +120,8 @@ func serve(log *slog.Logger) error {
 	case <-ctx.Done():
 	}
 
-	// Shutdown mulus: tandai tidak siap -> beri waktu load balancer menarik instance ->
-	// selesaikan request yang sedang berjalan -> tutup.
+	// Graceful shutdown: mark not ready, give the load balancer time to drain the instance,
+	// let in-flight requests finish, then close.
 	log.Info("shutdown dimulai")
 	ready.Store(false)
 	time.Sleep(cfg.DrainDelay)
@@ -150,7 +158,7 @@ func genkey() error {
 	return nil
 }
 
-// healthcheck dipakai HEALTHCHECK Docker. Image distroless tidak punya curl/wget.
+// healthcheck backs the Docker HEALTHCHECK; the distroless image has no curl/wget.
 func healthcheck() error {
 	addr := os.Getenv("ADDR")
 	if addr == "" || addr[0] == ':' {
